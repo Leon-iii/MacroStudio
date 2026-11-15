@@ -39,6 +39,9 @@ class Desktop:
     def hotkey_conflict(self, key, hotkeys):
         return False
 
+    def modifiers_pressed(self):
+        return False
+
     def send_key_down(self, key):
         self.events.append((self.clock.now_ns, "down", key))
 
@@ -49,6 +52,36 @@ class Desktop:
 class PollClock(VirtualClock):
     def advance_to(self, deadline_ns):
         super().advance_to(min(self.now_ns + 1_000_000, deadline_ns))
+
+
+@pytest.mark.parametrize("stop_during_wait", [False, True])
+def test_live_hotkey_waits_for_modifier_release_before_sending_a_single_key(stop_during_wait):
+    class ArrowDesktop(Desktop):
+        def modifiers_pressed(self):
+            return self.clock.now_ns < 40_000_000
+
+        def hotkey_conflict(self, key, hotkeys):
+            return key == "scan:E04B" and "CTRL+LEFT" in hotkeys and self.modifiers_pressed()
+
+    clock = PollClock()
+    desktop = ArrowDesktop(clock)
+    desktop.signals = {5_000_000: [4]}
+    if stop_during_wait:
+        desktop.signals[25_000_000] = [1]
+    program = validate_program({
+        "ir_version": 1, "project_id": "keyboard-release",
+        "workflows": {"tap": {"steps": [{"op": "key_tap", "key": "LEFT", "hold_ns": 10_000_000}]}},
+        "handlers": [{"id": "hotkey", "workflow_id": "tap", "event": {"type": "hotkey_pressed", "hotkey": "CTRL+LEFT"}}],
+    })
+    result = run_live(program, desktop, 1, 90_000_000, clock=clock)
+    assert result["errors"] == []
+    if stop_during_wait:
+        assert result["termination"] == "stopped" and desktop.events == []
+        return
+    assert len(desktop.events) == 2
+    down, up = desktop.events
+    assert down[0] >= 40_000_000 and down[1:] == ("down", "scan:E04B")
+    assert up == (down[0] + 10_000_000, "up", "scan:E04B")
 
 
 def test_coordinate_click_does_not_move_to_a_point_outside_target():

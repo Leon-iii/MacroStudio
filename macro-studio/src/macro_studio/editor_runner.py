@@ -12,6 +12,7 @@ from .sensors import ScreenSensors, sensor_specs
 
 
 HEARTBEAT_TIMEOUT_NS = 1_000_000_000
+ACTIVE_BLOCK_UPDATE_NS = 33_000_000
 
 
 def emit(kind, **data):
@@ -67,6 +68,7 @@ def debugger(clock, command, flush, state):
             return
         started = perf_counter_ns()
         flush()
+        state("BREAKPOINT")
         emit("breakpoint", block_id=step["block_id"])
         try:
             while True:
@@ -94,6 +96,9 @@ def main():
     reported = 0
     counts = dict(pressed=0, released=0)
     next_update = last_seen
+    next_active_update = last_seen
+    active_blocks = ()
+    running = False
     sensors = None
     sensor_errors = Queue(maxsize=32)
 
@@ -159,8 +164,11 @@ def main():
             closed = True
 
     def command():
-        nonlocal next_update
+        nonlocal next_update, next_active_update
         now = perf_counter_ns()
+        if now >= next_active_update:
+            publish_active_blocks()
+            next_active_update = now + ACTIVE_BLOCK_UPDATE_NS
         if now >= next_update:
             publish()
             next_update = now + 250_000_000
@@ -172,7 +180,18 @@ def main():
         except Empty:
             return None
 
+    def publish_active_blocks():
+        nonlocal active_blocks
+        current = runtime.active_block_ids() if runtime is not None and running else ()
+        if current != active_blocks:
+            active_blocks = current
+            emit("active_blocks", block_ids=current)
+
     def state(value):
+        nonlocal running
+        running = value == "RUNNING"
+        if not running:
+            publish_active_blocks()
         emit("state", state=value)
 
     try:

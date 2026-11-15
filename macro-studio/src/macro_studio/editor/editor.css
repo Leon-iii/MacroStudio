@@ -7,6 +7,11 @@ body { background: #e9edf2; color: #182637; font: 14px "Malgun Gothic", sans-ser
 .blocklyScrollbarHandle { fill: #8393a6; }
 .blocklyHighlightedConnectionPath { stroke: #315de0; }
 .msBreakpoint > .blocklyPath { stroke: #b62b43; stroke-width: 3px; }
+.msExecuting > .blocklyPath { stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
 .msBlockHeader { pointer-events: none; }
 .msPanning, .msPanning .blocklyMainBackground { cursor: grabbing; }
 .msBlockHeader text { fill: #fff; font: 600 13px "Malgun Gothic", sans-serif; }
+.blocklySvg .blocklyField.blocklyInputField.msKeyField > .blocklyFieldRect { fill: #17477f; fill-opacity: 1; }
+.blocklySvg .blocklyField.blocklyInputField.msKeyField:hover > .blocklyFieldRect { fill: #1b508d; }
+.blocklySvg .blocklyField.msKeyField > text.blocklyFieldText { fill: #fff; }
+.msKeyDivider { stroke: #a9c6ec; stroke-width: 1.5; pointer-events: none; }

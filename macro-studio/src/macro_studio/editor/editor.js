@@ -54,6 +54,11 @@ Blockly.fieldRegistry.register("field_studio_colour", StudioColourField);
 let listenForKey;
 const hotkeyBlocks = new Set(["ms_hotkey", "ms_state_hotkey"]);
 const singleKeyBlocks = new Set(["ms_key_tap", "ms_tap_sequence"]);
+const directionLabels = new Map([["LEFT", "←"], ["RIGHT", "→"], ["UP", "↑"], ["DOWN", "↓"]]);
+
+function keyLabel(value) {
+  return (value ?? "").split("+").map(part => directionLabels.get(part.trim().toUpperCase()) ?? part).join("+");
+}
 
 class StudioKeyField extends Blockly.FieldTextInput {
   static fromJson(options) {
@@ -61,7 +66,37 @@ class StudioKeyField extends Blockly.FieldTextInput {
   }
 
   getText_() {
-    return `${this.getValue()} · 키 듣기`;
+    return keyLabel(this.getValue());
+  }
+
+  isFullBlockField() {
+    return false;
+  }
+
+  initView() {
+    super.initView();
+    const root = this.getSvgRoot();
+    root.classList.add("msKeyField");
+    const {createSvgElement} = Blockly.utils.dom;
+    this.divider = createSvgElement("line", {class: "msKeyDivider"}, root);
+    this.listenLabel = createSvgElement("text", {class: "blocklyText blocklyFieldText msKeyListen"}, root);
+    const baseline = this.getTextElement().getAttribute("dominant-baseline");
+    if (baseline) this.listenLabel.setAttribute("dominant-baseline", baseline);
+    this.listenLabel.textContent = "키 듣기";
+  }
+
+  render_() {
+    super.render_();
+    const padding = this.getConstants().FIELD_BORDER_RECT_X_PADDING;
+    const dividerX = this.size_.width;
+    this.listenLabel.setAttribute("x", dividerX + padding);
+    this.listenLabel.setAttribute("y", this.getTextElement().getAttribute("y"));
+    this.divider.setAttribute("x1", dividerX);
+    this.divider.setAttribute("x2", dividerX);
+    this.divider.setAttribute("y1", 5);
+    this.divider.setAttribute("y2", this.size_.height - 5);
+    this.size_.width += Blockly.utils.dom.getTextWidth(this.listenLabel) + 2 * padding;
+    this.positionBorderRect_();
   }
 
   showEditor_() {
@@ -151,6 +186,8 @@ Blockly.defineBlocksWithJsonArray([
     inputsInline: true},
   {...expression("arithmetic", "%1 %2 %3", [value("A", "Number"),
     dropdown("OP", arithmeticOperators), value("B", "Number")], "Number", "arithmetic"), inputsInline: true},
+  {...expression("random_float", "%1 ~ %2 사이 무작위 실수", [value("A", "Number"), value("B", "Number")],
+    "Number", "arithmetic"), inputsInline: true},
   {...expression("comparison", "%1 %2 %3", [value("A"), dropdown("OP", comparisonOperators), value("B")], "Boolean", "logic"),
     inputsInline: true},
   {...expression("logical", "%1 %2 %3", [value("A", "Boolean"),
@@ -163,9 +200,10 @@ Blockly.defineBlocksWithJsonArray([
   {...expression("target_window", "대상 창 상태가 %1",
     [dropdown("STATE", [["전면", "foreground"], ["열려 있음", "exists"], ["최소화", "minimized"]])],
     "Boolean"), colour: "#23627c"},
-  {...expression("region_image", "영역 %1 너비 %2 높이 %3 에 이미지 %4 있음",
+  {...expression("region_image", "영역 %1 너비 %2 높이 %3 에 이미지 %4 있음 · 최소 일치도 %5",
     [value("POSITION", "Position"), value("WIDTH", "Number"), value("HEIGHT", "Number"),
-     {type: "field_studio_image_asset", name: "IMAGE"}], "Boolean"), colour: "#23627c", inputsInline: true},
+     {type: "field_studio_image_asset", name: "IMAGE"}, number("SIMILARITY", 1, 0, 1)], "Boolean"),
+    colour: "#23627c", inputsInline: true},
   {...expression("region_text", "영역 %1 너비 %2 높이 %3 에 텍스트 %4 있음 %5",
     [value("POSITION", "Position"), value("WIDTH", "Number"), value("HEIGHT", "Number"), input("TEXT", "READY"),
      dropdown("LANGUAGE", [["영어", "eng"], ["한국어", "kor"], ["한국어+영어", "kor+eng"]])],
@@ -204,7 +242,7 @@ const categories = [
   ["시간", "time", ["duration", "wait_time"]],
   ["제어", "control", ["repeat", "forever", "while", "if_only", "if", "break", "continue", "end"]],
   ["변수", "variable", ["set", "variable", "text"]],
-  ["산술 연산", "arithmetic", ["number", "arithmetic"]],
+  ["산술 연산", "arithmetic", ["number", "arithmetic", "random_float"]],
   ["논리 연산", "logic", ["boolean", "comparison", "logical", "not"]],
   ["화면 센서", "screen", ["pixel_color", "region_image", "region_text", "target_window"]],
   ["워크플로", "workflow", ["workflow", "param_def", "parameter", "argument", "call", "call_store", "call_if", "return"]],
@@ -245,6 +283,7 @@ const toolboxInputs = {
   if_only: inactiveCondition,
   if: inactiveCondition,
   arithmetic: {A: numberShadow(0), B: numberShadow(1)},
+  random_float: {A: numberShadow(0), B: numberShadow(1)},
   comparison: {A: numberShadow(0), B: numberShadow(1)},
   logical: {A: booleanShadow(false), B: booleanShadow(true)},
   not: {VALUE: booleanShadow(false)},
@@ -290,7 +329,7 @@ function headerLines(block) {
     case "ms_state_condition":
       return [field("FROM") + " → " + field("TO"), condition ? guard : "조건 연결 필요"];
     case "ms_state_hotkey": return [field("FROM") + " → " + field("TO"),
-      (block.getInputTargetBlock("KEY")?.getFieldValue("VALUE") || "키 선택") + (condition ? " · " + condition : "")];
+      (keyLabel(block.getInputTargetBlock("KEY")?.getFieldValue("VALUE")) || "키 선택") + (condition ? " · " + condition : "")];
     default: return [];
   }
 }
@@ -299,7 +338,7 @@ function updateBlockHeader(block) {
   if (!block || block.previousConnection || block.outputConnection || !block.getSvgRoot()) return;
   if (block.type === "ms_hotkey") {
     const title = block.getField("TITLE");
-    const key = block.getInputTargetBlock("KEY")?.getFieldValue("VALUE");
+    const key = keyLabel(block.getInputTargetBlock("KEY")?.getFieldValue("VALUE"));
     const text = key ? `단축키 ${key}` : "단축키";
     if (title.getValue() !== text) {
       Blockly.Events.disable();
@@ -640,10 +679,23 @@ new QWebChannel(qt.webChannelTransport, channel => {
     },
   });
   let viewing = false;
+  let activeBlockRoots = new Set();
+  function showActiveBlocks(ids) {
+    const roots = new Set(ids.map(id => workspace.getBlockById(id)?.getSvgRoot()).filter(Boolean));
+    for (const root of activeBlockRoots) {
+      if (!roots.has(root)) root.classList.remove("msExecuting");
+    }
+    for (const root of roots) {
+      if (!activeBlockRoots.has(root)) root.classList.add("msExecuting");
+    }
+    activeBlockRoots = roots;
+  }
+  bridge.activeBlocksChanged.connect(showActiveBlocks);
   bridge.loadWorkspace.connect(data => {
     viewing = true;
     try {
       Blockly.Events.disable();
+      showActiveBlocks([]);
       const state = JSON.parse(data);
       state.blocks?.blocks?.forEach(upgradeBlockInputs);
       Blockly.serialization.workspaces.load(state, workspace);

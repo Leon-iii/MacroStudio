@@ -71,6 +71,52 @@ def test_screen_colors_and_image_positions():
     assert not sample(spec, lambda **kwargs: frame, template)
 
 
+@pytest.mark.parametrize("threshold, expected", [(None, False), (1.0, False), (0.98, True), (0.90, True), (0, True)])
+def test_image_similarity_keeps_exact_default_and_accepts_small_rgb_changes(threshold, expected):
+    Image = pytest.importorskip("PIL.Image")
+    template = Image.new("RGB", (4, 4), (80, 110, 140))
+    frame = Image.new("RGB", (16, 16))
+    frame.paste(Image.new("RGB", (4, 4), (84, 114, 144)), (12, 12))
+    spec = dict(PIXEL, op="region_image", width=16, height=16)
+    if threshold is not None:
+        spec["min_similarity"] = threshold
+    assert sample(spec, lambda **_: frame, template) is expected
+
+
+def test_image_similarity_search_matches_direct_pixel_scores():
+    from random import Random
+    from macro_studio.sensors import contains_similar_image
+
+    Image = pytest.importorskip("PIL.Image")
+    rng = Random(42)
+    for _ in range(12):
+        frame = Image.frombytes("RGB", (8, 7), rng.randbytes(8 * 7 * 3))
+        template = Image.frombytes("RGB", (3, 5), rng.randbytes(3 * 5 * 3))
+        scores = []
+        for y in range(3):
+            for x in range(6):
+                pixels = frame.crop((x, y, x + 3, y + 5)).tobytes()
+                error = sum(abs(a - b) for a, b in zip(pixels, template.tobytes()))
+                maximum = len(pixels) * 255
+                scores.append((maximum - error) / maximum)
+        for threshold in (0.0, 0.6, 0.8, max(scores), 0.999):
+            assert contains_similar_image(frame, template, threshold) == (max(scores) >= threshold)
+    assert not contains_similar_image(template, frame, 0)
+
+
+def test_image_similarity_preserves_matches_at_odd_offsets_for_alternating_patterns():
+    from macro_studio.sensors import contains_similar_image
+
+    Image = pytest.importorskip("PIL.Image")
+    pattern = bytes(255 * ((x + y) % 2) for y in range(4) for x in range(6) for _ in range(3))
+    template = Image.frombytes("RGB", (6, 4), pattern)
+    almost = Image.frombytes("RGB", (6, 4), bytes(252 if value else 3 for value in pattern))
+    frame = Image.new("RGB", (13, 11), (112, 112, 112))
+    frame.paste(almost, (5, 4))
+    assert contains_similar_image(frame, template, 0.98)
+    assert not contains_similar_image(frame, template, 0.99)
+
+
 def test_blockly_pixel_guard_compiles_to_sensor_reference():
     workspace = {"blocks": {"blocks": [{
         "type": "ms_start", "id": "startup", "inputs": {"GUARD": {"block": {
@@ -92,6 +138,17 @@ def test_image_sensor_requires_referenced_project_asset():
         compile_project(project)
     program, _ = compile_project({**project, "image_assets": {asset_id: {"name": "버튼"}}})
     assert sensor_specs(program)[0]["image"] == asset_id
+    assert sensor_specs(program)[0]["min_similarity"] == 1.0
+
+
+@pytest.mark.parametrize("threshold", [-0.01, 1.01, True, "0.9", float("nan")])
+def test_image_similarity_validates_threshold(threshold):
+    region = {"type": "ms_region_image", "id": "image-check", "fields": {
+        "X": 0, "Y": 0, "WIDTH": 20, "HEIGHT": 10, "IMAGE": "template.png", "SIMILARITY": threshold,
+    }}
+    start = {"type": "ms_start", "id": "start", "inputs": {"GUARD": {"block": region}}}
+    with pytest.raises(ValidationError, match="minimum image similarity"):
+        compile_project({"project_id": "images", "workspace": {"blocks": {"blocks": [start]}}})
 
 
 def test_stalled_sampler_cannot_stall_live_deadlines(tmp_path):

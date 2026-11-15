@@ -28,6 +28,7 @@ _MODIFIERS = {
 _VIRTUAL_KEYS = {name: ord(name) for name in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}
 _VIRTUAL_KEYS.update({f"F{i}": 0x6F + i for i in range(1, 13)})
 _VIRTUAL_KEYS.update(ENTER=0x0D, SPACE=0x20, TAB=0x09, ESC=0x1B)
+_VIRTUAL_KEYS.update(LEFT=0x25, UP=0x26, RIGHT=0x27, DOWN=0x28)
 
 
 class KeyboardInput(c.Structure):
@@ -224,11 +225,17 @@ class WindowsDesktop:
         matching_flags = [flags for flags, trigger in map(_hotkey, hotkeys) if trigger == virtual_key]
         if not matching_flags:
             return False
-        modifiers = sum(
+        modifiers = self._active_modifiers()
+        return any(flags & modifiers == flags for flags in matching_flags)
+
+    def _active_modifiers(self) -> int:
+        return sum(
             flag for flag, keys in _MODIFIERS.values()
             if any(self._get_key_state(vk) & 0x8000 for vk in keys)
         )
-        return any(flags & modifiers == flags for flags in matching_flags)
+
+    def modifiers_pressed(self) -> bool:
+        return bool(self._active_modifiers())
 
     def unmodified_hotkey_conflict(self, key: str, hotkeys: Iterable[str]) -> bool:
         virtual_key = self._virtual_key(key)

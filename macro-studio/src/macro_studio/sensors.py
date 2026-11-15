@@ -1,3 +1,4 @@
+from array import array
 from collections import OrderedDict
 from io import BytesIO
 from multiprocessing import get_context
@@ -64,6 +65,112 @@ def contains_image(frame, template):
     return False
 
 
+def summed_rows(width, height, rows, *, signed=False):
+    stride = width + 1
+    totals = array("i" if signed else "I", [0]) * (stride * (height + 1))
+    for y, values in enumerate(rows):
+        row = (y + 1) * stride + 1
+        running = 0
+        for index, value in enumerate(values, start=row):
+            running += value
+            totals[index] = running + totals[index - stride]
+    return totals
+
+
+def channel_rows(channel):
+    width = channel.width
+    data = channel.tobytes()
+    return (data[offset:offset + width] for offset in range(0, len(data), width))
+
+
+def alternating_rows(image, x_weight, y_weight):
+    for y, row in enumerate(zip(*(channel_rows(channel) for channel in image.split()))):
+        yield (-(r + g + b) if (x * x_weight + y * y_weight) % 2 else r + g + b
+               for x, (r, g, b) in enumerate(zip(*row)))
+
+
+def contains_similar_image(frame, template, threshold):
+    from PIL import ImageChops, ImageStat
+
+    fw, fh = frame.size
+    tw, th = template.size
+    if tw > fw or th > fh:
+        return False
+    if threshold == 0:
+        return True
+
+    max_error = tw * th * 3 * 255
+    use_histogram = tw * th * 3 > 4096
+
+    def matches(x, y):
+        patch = frame.crop((x, y, x + tw, y + th))
+        difference = ImageChops.difference(patch, template)
+        error = sum(ImageStat.Stat(difference).sum) if use_histogram else sum(difference.tobytes())
+        return (max_error - error) / max_error >= threshold
+
+    if matches(0, 0):
+        return True
+    if (fw, fh) == (tw, th):
+        return False
+
+    # If the frame lacks a template color, its distance to the available range is unavoidable.
+    histogram = template.histogram()
+    range_error = sum(
+        histogram[channel * 256 + value] * max(low - value, value - high, 0)
+        for channel, (low, high) in enumerate(frame.getextrema())
+        for value in range(256)
+    )
+    if (max_error - range_error) / max_error < threshold:
+        return False
+
+    stride = fw + 1
+    channels = tuple(summed_rows(fw, fh, channel_rows(channel)) for channel in frame.split())
+    # Alternating signed sums can also reject stripes or checker patterns with identical RGB sums.
+    signatures = (
+        (sum(map(sum, alternating_rows(template, x_weight, y_weight))), x_weight, y_weight)
+        for x_weight, y_weight in ((1, 0), (0, 1), (1, 1))
+    )
+    signature, x_weight, y_weight = max(signatures, key=lambda pattern: abs(pattern[0]))
+    alternating = (summed_rows(fw, fh, alternating_rows(frame, x_weight, y_weight), signed=True)
+                   if (max_error - abs(signature)) / max_error < threshold else None)
+
+    def region(x0, y0, x1, y1):
+        expected = ImageStat.Stat(template.crop((x0, y0, x1, y1))).sum
+        return (y0 * stride + x0, y0 * stride + x1, y1 * stride + x0, y1 * stride + x1, expected)
+
+    whole = (region(0, 0, tw, th),)
+    columns, rows = min(4, tw), min(4, th)
+    tiles = [region(x * tw // columns, y * th // rows, (x + 1) * tw // columns, (y + 1) * th // rows)
+             for y in range(rows) for x in range(columns)]
+
+    def could_match(origin, regions):
+        # The difference between RGB sums is a lower bound on the sum of pixel differences.
+        error = 0
+        for tl, tr, bl, br, expected in regions:
+            for totals, target in zip(channels, expected):
+                total = totals[origin + br] - totals[origin + bl] - totals[origin + tr] + totals[origin + tl]
+                error += abs(total - target)
+            if (max_error - error) / max_error < threshold:
+                return False
+        return True
+
+    for y in range(fh - th + 1):
+        for x in range(fw - tw + 1):
+            origin = y * stride + x
+            if not origin or not could_match(origin, whole):
+                continue
+            if alternating is not None:
+                bottom = origin + th * stride
+                signed_sum = alternating[bottom + tw] - alternating[bottom] - alternating[origin + tw] + alternating[origin]
+                if (x * x_weight + y * y_weight) % 2:
+                    signed_sum = -signed_sum
+                if (max_error - abs(signed_sum - signature)) / max_error < threshold:
+                    continue
+            if could_match(origin, tiles) and matches(x, y):
+                return True
+    return False
+
+
 def read_text(frame, language):
     executable = next((directory / "tesseract.exe"
                        for directory in map(Path, environ.get("PATH", "").split(pathsep))
@@ -95,7 +202,10 @@ def sample(spec, grab, template=None):
         return bytes(frame.getpixel((0, 0))) == bytes.fromhex(spec["color"][1:])
     if spec["op"] == "region_text":
         return normalize_text(spec["text"]) in normalize_text(read_text(frame, spec["language"]))
-    return contains_image(frame, template)
+    threshold = spec.get("min_similarity", 1.0)
+    if threshold == 1.0:
+        return contains_image(frame, template)
+    return contains_similar_image(frame, template, threshold)
 
 
 def worker(specs, base, requests, output, stopped):

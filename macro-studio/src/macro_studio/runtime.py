@@ -16,6 +16,8 @@ YIELD_NS = 1_000_000
 SECOND_NS = 1_000_000_000
 STATE_CHECK_NS = 200_000_000
 POINTER_STEP_NS = 16_000_000
+KEYBOARD_RETRY_NS = 5_000_000
+MODIFIER_RELEASE_TIMEOUT_NS = 2_000_000_000
 
 
 class TaskFault(ValueError):
@@ -73,6 +75,7 @@ class Runtime:
         self.termination = "completed"
         self.stop_latency_ns: int | None = None
         self.before_press: Callable[[str], None] | None = None
+        self.modifiers_pressed: Callable[[], bool] | None = None
         self.before_move: Callable[[tuple[int, int]], None] | None = None
         self.before_block: Callable[[dict], None] | None = None
         self.read_sensor: Callable[[str], bool] | None = None
@@ -304,6 +307,9 @@ class Runtime:
         variables = ChainMap(parameters, self.globals) if parameters else self.globals
         return evaluate(expression, variables, self.read_sensor, self.read_window, self.read_sensor_at)
 
+    def active_block_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({task.block_id for task in self._active if task.block_id is not None}))
+
     def _schedule(self, task: Task, deadline: int) -> None:
         heappush(self._ready, (deadline, next(self._order), task))
 
@@ -439,6 +445,8 @@ class Runtime:
                     yield from self._move_pointer(task, step, scope, self._duration_ns(step, scope))
                 case "key_tap" | "mouse_click" | "mouse_click_at":
                     hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
+                    if step["op"] == "key_tap":
+                        yield from self._wait_for_modifiers()
                     if step["op"] == "mouse_click_at":
                         yield from self._move_pointer(task, step, scope, 0)
                     pressed_at = self.clock.now_ns
@@ -449,6 +457,16 @@ class Runtime:
                     self._release(task, release_at)
                 case "tap_sequence":
                     yield from self._tap_sequence(task, step, scope)
+
+    def _wait_for_modifiers(self) -> Iterator[int]:
+        if self.modifiers_pressed is None:
+            return
+        deadline = self.clock.now_ns + MODIFIER_RELEASE_TIMEOUT_NS
+        while self.modifiers_pressed():
+            now = self.clock.now_ns
+            if now >= deadline:
+                raise TaskFault("keyboard_modifiers_held", "Ctrl, Alt, Shift 또는 Win 키를 놓아 주세요.")
+            yield min(deadline, now + KEYBOARD_RETRY_NS)
 
     def _duration_ns(self, step: dict, scope: dict, *, legacy_key: str = "duration_ns") -> int:
         if legacy_key in step:
@@ -524,6 +542,7 @@ class Runtime:
         hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
         if hold_ns * frequency >= SECOND_NS:
             raise TaskFault("tap_sequence_duration", "hold must be shorter than the period")
+        yield from self._wait_for_modifiers()
         origin = self.clock.now_ns
         tick = 0
         while tick < count:

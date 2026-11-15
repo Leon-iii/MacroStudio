@@ -12,6 +12,7 @@ MODIFIER_KEYS = {Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Ke
 NAMED_KEYS = {
     Qt.Key.Key_Return: "ENTER", Qt.Key.Key_Enter: "ENTER", Qt.Key.Key_Space: "SPACE",
     Qt.Key.Key_Tab: "TAB", Qt.Key.Key_Backtab: "TAB", Qt.Key.Key_Escape: "ESC",
+    Qt.Key.Key_Left: "LEFT", Qt.Key.Key_Up: "UP", Qt.Key.Key_Right: "RIGHT", Qt.Key.Key_Down: "DOWN",
 }
 
 
@@ -59,7 +60,7 @@ class KeyCaptureDialog(QDialog):
         flags = event.modifiers()
         modifiers = [label for flag, label in MODIFIERS if flags & flag]
         if not name or flags & Qt.KeyboardModifier.GroupSwitchModifier:
-            self.prompt.setText("영문자, 숫자, F1–F12, Enter, Space, Tab, Esc 중 하나를 눌러 주세요.")
+            self.prompt.setText("영문자, 숫자, F1–F12, 방향키, Enter, Space, Tab, Esc 중 하나를 눌러 주세요.")
         elif self.mode == "hotkey" and not modifiers:
             self.prompt.setText("Ctrl, Alt, Shift, Win 중 하나 이상을 함께 눌러 주세요.")
         elif self.mode == "single" and modifiers:

@@ -170,6 +170,8 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             if not desktop.focused(target):
                 pause_pending = True
                 raise TaskFault("focus_lost", "target is no longer in the foreground")
+            if not mouse and desktop.modifiers_pressed():
+                raise TaskFault("keyboard_modifiers_held", "Ctrl, Alt, Shift 또는 Win 키를 놓아 주세요.")
             if mouse and not desktop.cursor_over(target):
                 raise TaskFault("pointer_outside_target", "mouse pointer must be over the target window")
 
@@ -183,6 +185,7 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
 
         runtime = Runtime(live_program, clock, desktop)
         runtime.before_press = before_press
+        runtime.modifiers_pressed = desktop.modifiers_pressed
         runtime.before_move = before_move
         runtime.read_window = lambda state: desktop.window_state(target, state)
         if metrics:

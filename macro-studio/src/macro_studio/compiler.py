@@ -34,6 +34,8 @@ def compile_project(project):
             return {"var": field(value, "NAME")}
         if kind == "parameter":
             return {"var": PARAM_PREFIX + field(value, "NAME")}
+        if kind == "random_float":
+            return {"op": kind, "args": [expression(value, "A", 0), expression(value, "B", 1)]}
         if kind in ("binary", "arithmetic", "comparison", "logical"):
             default = False if kind == "logical" else 0
             return {"op": field(value, "OP"), "args": [
@@ -57,7 +59,8 @@ def compile_project(project):
                 fail(value, "기준 이미지를 선택하세요.")
             if isinstance(image, str) and image.startswith("asset:") and image not in project.get("image_assets", {}):
                 fail(value, "프로젝트에 등록된 기준 이미지를 다시 선택하세요.")
-            return dict(sensor, image=image)
+            threshold = value.get("fields", {}).get("SIMILARITY", 1.0)
+            return dict(sensor, image=image, min_similarity=threshold)
         fail(value, "지원하지 않는 값 블록입니다.")
 
     def chain(block, kind):

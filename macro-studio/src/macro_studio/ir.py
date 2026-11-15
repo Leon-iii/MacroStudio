@@ -1,5 +1,6 @@
 import math
 import operator
+from random import uniform
 import re
 
 MAX_REPEAT_COUNT = 1_000_000
@@ -16,6 +17,7 @@ PARAM_PREFIX = "@arg:"
 
 _BINARY = {
     "add": operator.add, "sub": operator.sub, "mul": operator.mul, "div": operator.truediv,
+    "random_float": uniform,
     "eq": operator.eq, "ne": operator.ne, "lt": operator.lt, "le": operator.le,
     "gt": operator.gt, "ge": operator.ge,
 }
@@ -28,6 +30,7 @@ _SCAN_CODES = {
 _SCAN_CODES.update({digit: 2 + index for index, digit in enumerate("1234567890")})
 _SCAN_CODES.update({f"F{i}": 0x3A + i for i in range(1, 11)})
 _SCAN_CODES.update(F11=0x57, F12=0x58, ENTER=0x1C, SPACE=0x39, TAB=0x0F, ESC=1)
+_SCAN_CODES.update(LEFT=0xE04B, UP=0xE048, RIGHT=0xE04D, DOWN=0xE050)
 _MODIFIERS = ("CTRL", "ALT", "SHIFT", "WIN")
 
 
@@ -105,6 +108,9 @@ def _expression(value: object, variables: dict, path: str, depth: int = 0) -> ty
         else:
             if op == "region_image":
                 _name(value.get("image"), label)
+                threshold = value.get("min_similarity", 1.0)
+                if type(threshold) not in (float, int) or not 0 <= threshold <= 1:
+                    raise ValidationError(f"{label}: minimum image similarity must be between 0 and 1")
             else:
                 text = _name(value.get("text"), label)
                 if len(text) > 512 or value.get("language") not in OCR_LANGUAGES:

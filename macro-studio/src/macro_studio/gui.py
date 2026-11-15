@@ -5,15 +5,15 @@ import sys
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from PySide6.QtCore import QByteArray, QIODevice, QObject, QProcess, QSize, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QIODevice, QObject, QPointF, QProcess, QSize, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 from .block_help import BlockHelp
@@ -42,6 +42,8 @@ QLabel#mode[armed="true"] { color: #733c0d; background: #f8ead4; }
 QPushButton, QComboBox, QLineEdit { background: #fff; border: 1px solid #b9c7d7; border-radius: 5px; padding: 6px 10px; min-height: 24px; }
 QPushButton:hover { background: #eef3fa; }
 QPushButton:focus, QLineEdit:focus, QComboBox:focus { border: 2px solid #2455cb; padding: 5px 9px; }
+QComboBox#targetWindow { padding-right: 26px; }
+QComboBox#targetWindow::drop-down { width: 24px; border: none; background: transparent; }
 QPushButton[transportIcon="true"] { padding: 0; min-height: 0; border-radius: 7px; }
 QPushButton#transport { background: #234fbf; border-color: #234fbf; }
 QPushButton#transport:hover { background: #1a429f; }
@@ -62,6 +64,8 @@ TRANSPORT_ICONS = {
     "stop": ('<rect x="6" y="6" width="12" height="12" rx="1.4" fill="currentColor" stroke="none"/>', "#fff"),
     "pause": ('<path d="M9 5.5v13M15 5.5v13" stroke-width="2.8"/>', "#274775"),
     "resume": ('<path d="M8 4.5 20 12 8 19.5Z" fill="currentColor" stroke="none"/>', "#274775"),
+    "refresh": ('<path d="M20 11a8 8 0 0 0-14-5L4 8m0-5v5h5m-5 5a8 8 0 0 0 14 5l2-2m0 5v-5h-5"/>',
+                "#274775"),
 }
 
 
@@ -81,9 +85,28 @@ def transport_icon(shape, color):
     return icon
 
 
+class TargetWindowComboBox(QComboBox):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        arrow = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option,
+                                            QStyle.SubControl.SC_ComboBoxArrow, self)
+        center = arrow.center()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#274775" if self.isEnabled() else "#576b82")
+        painter.setPen(QPen(color, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        tip = QPointF(center.x(), center.y() + 2)
+        painter.drawLine(QPointF(center.x() - 4, center.y() - 2), tip)
+        painter.drawLine(tip, QPointF(center.x() + 4, center.y() - 2))
+        painter.end()
+
+
 class Bridge(QObject):
     loadWorkspace = Signal(str)
     focusBlock = Signal(str)
+    activeBlocksChanged = Signal(list)
     loaded = Signal()
     updated = Signal(str)
     helpRequested = Signal(str)
@@ -257,12 +280,17 @@ class Studio(QMainWindow):
         self.stats.setAccessibleName("실행 통계")
         side.addWidget(self.stats)
         form = QFormLayout()
-        self.targets = QComboBox()
+        self.targets = TargetWindowComboBox(objectName="targetWindow")
+        self.targets.setAccessibleName("대상 창")
         self.targets.setMinimumWidth(140)
         self.targets.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        form.addRow("대상 창", self.targets)
-        self.target_button = self.button("창 목록 새로 고침", self.load_targets)
-        form.addRow(self.target_button)
+        target_row = QHBoxLayout()
+        target_row.setSpacing(6)
+        target_row.addWidget(self.targets, 1)
+        self.target_button = self.icon_button("refreshTargets", self.load_targets, size=38)
+        self.set_icon_action(self.target_button, "refresh", "창 목록 새로 고침")
+        target_row.addWidget(self.target_button)
+        form.addRow("대상 창", target_row)
         self.globals = QLineEdit("{}")
         self.globals.setToolTip('전역 변수 초기값 JSON. 예: {"enabled": true}')
         self.globals.textEdited.connect(self.modified)
@@ -305,10 +333,10 @@ class Studio(QMainWindow):
         button.clicked.connect(action)
         return button
 
-    def icon_button(self, name, action):
+    def icon_button(self, name, action, *, size=42):
         button = self.button("", action, name)
         button.setProperty("transportIcon", True)
-        button.setFixedSize(42, 42)
+        button.setFixedSize(size, size)
         button.setIconSize(QSize(20, 20))
         return button
 
@@ -621,6 +649,8 @@ class Studio(QMainWindow):
                     self.bridge.focusBlock.emit(message["block_id"])
                     self.log("브레이크포인트 · " + message["block_id"])
                     self.refresh()
+                elif kind == "active_blocks":
+                    self.bridge.activeBlocksChanged.emit(message["block_ids"])
                 elif kind == "inputs":
                     self.log("\n".join(f"{action} · {key}" for action, key in message["events"]))
                     if message["omitted"]:
@@ -644,6 +674,7 @@ class Studio(QMainWindow):
 
     def runner_finished(self, code, exit_status):
         self.read_runner()
+        self.bridge.activeBlocksChanged.emit([])
         self.clear_runner_assets()
         self.heartbeat.stop()
         self.running = False

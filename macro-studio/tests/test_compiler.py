@@ -52,6 +52,33 @@ def test_key_objects_validate_their_connection_and_drive_hotkey_trigger(trigger_
     ]
 
 
+@pytest.mark.parametrize(("key", "scan", "virtual"), [
+    ("LEFT", 0x4B, 0x25), ("UP", 0x48, 0x26), ("RIGHT", 0x4D, 0x27), ("DOWN", 0x50, 0x28),
+])
+def test_arrow_key_objects_compile_to_extended_input_and_hotkey(key, scan, virtual):
+    from macro_studio.win32 import KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, WindowsDesktop, _hotkey
+
+    def key_input(value):
+        return {"shadow": {"type": "ms_key", "fields": {"VALUE": value}}}
+
+    tap = {"type": "ms_key_tap", "id": "tap", "fields": {"MS": 2}, "inputs": {"KEY": key_input(key)}}
+    trigger = {"type": "ms_hotkey", "id": "trigger", "inputs": {
+        "KEY": key_input(f"CTRL+{key}"), "BODY": {"block": tap},
+    }}
+    code, _ = compile_project(project(trigger))
+    step = code["workflows"]["@trigger"]["steps"][0]
+    assert step["key"] == f"scan:E0{scan:02X}"
+    assert _hotkey(code["handlers"][0]["event"]["hotkey"]) == (0x02, virtual)
+
+    desktop = object.__new__(WindowsDesktop)
+    packets = []
+    desktop._insert = lambda packet: packets.append((packet.data.keyboard.wScan, packet.data.keyboard.dwFlags))
+    desktop.send_key_down(step["key"])
+    desktop.send_key_up(step["key"])
+    flags = KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
+    assert packets == [(scan, flags), (scan, flags | KEYEVENTF_KEYUP)]
+
+
 @pytest.mark.parametrize(("unit", "divisor"), [("ms", 2), ("sec", 2_000), ("min", 120_000)])
 def test_wait_uses_live_numeric_expression_and_selected_unit(unit, divisor):
     def block(kind, fields=None, **inputs):

@@ -5,6 +5,9 @@ from queue import Queue
 import subprocess
 import sys
 from threading import Thread
+from types import SimpleNamespace
+
+import pytest
 
 from macro_studio.compiler import compile_project
 
@@ -68,3 +71,27 @@ def test_breakpoint_then_step_then_continue():
 
 def test_stop_at_breakpoint_does_not_execute_block():
     assert check_runner(b"stop") == []
+
+
+def test_editor_routes_execution_highlights_and_breakpoints_as_distinct_messages():
+    pytest.importorskip("PySide6.QtWebEngineWidgets")
+    from macro_studio.gui import Studio
+
+    messages = [
+        {"kind": "active_blocks", "block_ids": ["first", "second"]},
+        {"kind": "active_blocks", "block_ids": []},
+        {"kind": "breakpoint", "block_id": "third"},
+    ]
+    wire = b"".join(json.dumps(message).encode() + b"\n" for message in messages)
+    active, focused, logs, states = [], [], [], []
+    editor = SimpleNamespace(
+        session_state="RUNNING", pending_output=b"", log=logs.append,
+        process=SimpleNamespace(readAllStandardOutput=lambda: wire),
+        bridge=SimpleNamespace(activeBlocksChanged=SimpleNamespace(emit=active.append),
+                               focusBlock=SimpleNamespace(emit=focused.append)),
+    )
+    editor.refresh = lambda: states.append(editor.session_state)
+    Studio.read_runner(editor)
+    assert active == [["first", "second"], []]
+    assert focused == ["third"] and states == ["BREAKPOINT"]
+    assert logs == ["브레이크포인트 · third"]
