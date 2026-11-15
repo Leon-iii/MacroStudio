@@ -7,6 +7,7 @@ from time import perf_counter_ns, sleep
 
 from .backend import FakeInputBackend
 from .live import DeadlineClock, run_live
+from .output import DESKTOP_CAPABILITIES, FAKE_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
 from .runtime import Runtime
 from .sensors import ScreenSensors, sensor_specs
 
@@ -223,7 +224,9 @@ def main():
             clock = DebugClock() if debugging else DeadlineClock()
             paused = False
             backend = DryBackend(clock)
-            runtime = Runtime(program, clock, backend)
+            router = OutputRouter({OutputKind.FAKE: OutputRoute(DESKTOP_CAPABILITIES, lambda: backend)})
+            session = router.bind(program, RunConfig(FAKE_PROFILE))
+            runtime = Runtime(program, clock, session.backend)
             if config.get("query_target"):
                 from .win32 import WindowsDesktop
 

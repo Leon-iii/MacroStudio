@@ -5,6 +5,7 @@ from tempfile import NamedTemporaryFile
 from time import perf_counter_ns, sleep
 
 from .ir import DEFAULT_STOP_HOTKEY
+from .output import DESKTOP_CAPABILITIES, SENDINPUT_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
 from .runtime import Runtime, TaskFault
 
 FOCUS_TIMEOUT_NS = 5_000_000_000
@@ -74,6 +75,8 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
              stop_hotkey: str = DEFAULT_STOP_HOTKEY, metrics: bool = False,
              status=print, clock=None, control=None, on_state=None, on_runtime=None) -> dict:
     clock = DeadlineClock() if clock is None else clock
+    router = OutputRouter({OutputKind.SENDINPUT: OutputRoute(DESKTOP_CAPABILITIES, lambda: desktop)})
+    session = router.bind(program, RunConfig(SENDINPUT_PROFILE, dry_run=False, armed=True))
     target = desktop.target(hwnd)
     if stop_hotkey in (RESUME_HOTKEY, PAUSE_HOTKEY):
         raise ValueError("emergency stop conflicts with a session control hotkey")
@@ -183,7 +186,7 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             if not desktop.point_over(target, position):
                 raise TaskFault("pointer_outside_target", "destination must be over the target window")
 
-        runtime = Runtime(live_program, clock, desktop)
+        runtime = Runtime(live_program, clock, session.backend)
         runtime.before_press = before_press
         runtime.modifiers_pressed = desktop.modifiers_pressed
         runtime.before_move = before_move

@@ -6,6 +6,7 @@ import sys
 
 from .backend import FakeInputBackend, VirtualClock
 from .ir import DEFAULT_STOP_HOTKEY, MAX_DURATION_NS, ValidationError, normalize_hotkey, validate_program
+from .output import DESKTOP_CAPABILITIES, FAKE_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
 from .runtime import Runtime
 
 NS_PER_MS = 1_000_000
@@ -85,7 +86,9 @@ def main(argv: list[str] | None = None) -> int:
 
     clock = VirtualClock()
     backend = FakeInputBackend(clock)
-    runtime = Runtime(program, clock, backend)
+    router = OutputRouter({OutputKind.FAKE: OutputRoute(DESKTOP_CAPABILITIES, lambda: backend)})
+    session = router.bind(program, RunConfig(FAKE_PROFILE))
+    runtime = Runtime(program, clock, session.backend)
     runtime.run(args.duration_ms, args.hotkey)
     result = {
         "events": backend.events,
