@@ -107,6 +107,28 @@ def compile_project(project):
             fail(block, "키 누르기와 연타에는 단일 키를 연결하세요.")
         return key
 
+    def timed_events(block):
+        events = []
+        item = child(block, "EVENTS")
+        while item:
+            offset = field(item, "OFFSET")
+            if type(offset) is not int:
+                fail(item, "예약 시각은 정수 밀리초로 지정하세요.")
+            event = {"offset_us": offset * 1000}
+            kind = item["type"]
+            action = field(item, "ACTION")
+            if kind == "ms_batch_key":
+                event.update(action=f"key_{action}", key=keyboard_value(item))
+            elif kind == "ms_batch_button":
+                event.update(action=f"mouse_{action}", button=field(item, "BUTTON"))
+            elif kind == "ms_batch_move":
+                event.update(action="mouse_move", dx=field(item, "DX"), dy=field(item, "DY"))
+            else:
+                fail(item, "예약 입력 블록을 연결하세요.")
+            events.append(event)
+            item = item.get("next", {}).get("block")
+        return events
+
     def steps(block):
         result = []
         while block:
@@ -121,6 +143,8 @@ def compile_project(project):
                     step.update(op="wait", duration=duration_value(block))
                 case "emit_event":
                     step["name"] = field(block, "NAME")
+                case "timed_batch":
+                    step["events"] = timed_events(block)
                 case "mouse_click":
                     step.update(button=field(block, "BUTTON"), **hold_time(block))
                 case "mouse_click_at":

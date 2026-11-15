@@ -5,6 +5,8 @@ import pytest
 
 from macro_studio.backend import VirtualClock
 from macro_studio.benchmark import make_program, summarize
+from macro_studio.external_hid import FrameParser, Opcode
+from macro_studio.external_hid.serial_link import SerialLink
 from macro_studio.ir import validate_program
 from macro_studio.live import ArmStore, run_live
 
@@ -107,6 +109,152 @@ def test_coordinate_click_does_not_move_to_a_point_outside_target():
     assert [(error["code"], error["block_id"]) for error in result["errors"]] == [
         ("pointer_outside_target", "click"),
     ]
+
+
+@pytest.mark.parametrize("interruption", [None, "acceleration", "stop", "focus", "locked", "stop_held"])
+def test_hid_runner_corrects_coordinates_and_cancels_unsafe_clicks(monkeypatch, interruption):
+    from test_hid_serial_link import SimulatorPort
+
+    clock = PollClock()
+    port = SimulatorPort()
+    frames = []
+    observed = []
+    parser = FrameParser()
+    cursor = [0, 0]
+
+    class CoordinateDesktop(Desktop):
+        def mouse_position(self):
+            if interruption == "locked":
+                return (0, 0)
+            if interruption == "acceleration":
+                return tuple(cursor)
+            return port.device.pointer_offset
+
+        def point_over(self, target, position):
+            return True
+
+        def cursor_over(self, target):
+            if interruption == "focus":
+                self.blurred.add(clock.now_ns)
+            return True
+
+    desktop = CoordinateDesktop(clock)
+    if interruption == "stop":
+        desktop.signals[10_000_000] = [1]
+    if interruption == "stop_held":
+        desktop.signals[60_000_000] = [1]
+    write_port = port.write
+
+    def write(data):
+        old = port.device.pointer_offset
+        for frame in parser.feed(data):
+            frames.append(frame)
+            if frame.opcode is Opcode.INPUT_EVENT and frame.payload[:2] == b"\x02\x01":
+                observed.append(desktop.mouse_position())
+        written = write_port(data)
+        for axis, (previous, current) in enumerate(zip(old, port.device.pointer_offset)):
+            delta = current - previous
+            cursor[axis] += delta * (2 if abs(delta) > 16 else 1)
+        return written
+
+    port.write = write
+    monkeypatch.setattr("macro_studio.live.open_port", lambda name, timeout_ms: SerialLink(port, 123, timeout_ms))
+    program = validate_program({
+        "ir_version": 1, "project_id": "hid-click",
+        "workflows": {"click": {"steps": [{
+            "op": "mouse_click_at", "block_id": "click", "position": {"x": 300, "y": 10},
+            "button": "left", "hold_ns": 100_000_000,
+        }]}},
+        "handlers": [{"id": "start", "workflow_id": "click", "event": {"type": "project_start"}}],
+    })
+    result = run_live(program, desktop, 1, 800_000_000, clock=clock, hid_port="COM9")
+    assert desktop.events == []
+    assert [frame.opcode for frame in frames[:3]] == [Opcode.HELLO, Opcode.GET_CAPS, Opcode.ARM_SESSION]
+    assert frames[-1].opcode is Opcode.RELEASE_ALL
+    assert port.closed and not port.device.pressed_buttons
+    if interruption in (None, "acceleration", "stop_held"):
+        assert observed == [(300, 10)]
+        assert result["errors"] == []
+        assert any(frame.opcode is Opcode.INPUT_EVENT and frame.payload[:2] == b"\x02\x02" for frame in frames)
+    else:
+        assert observed == []
+    if interruption == "locked":
+        assert [error["code"] for error in result["errors"]] == ["pointer_off_position"]
+        assert sum(frame.opcode is Opcode.INPUT_EVENT for frame in frames) == 32
+        assert any(frame.opcode is Opcode.HEARTBEAT for frame in frames)
+    if interruption == "focus":
+        assert [error["code"] for error in result["errors"]] == ["focus_lost"]
+
+
+def test_hid_runner_maps_arrow_scan_and_releases_it_on_stop(monkeypatch):
+    from test_hid_serial_link import SimulatorPort
+
+    clock = PollClock()
+    desktop = Desktop(clock)
+    port = SimulatorPort()
+    monkeypatch.setattr("macro_studio.live.open_port", lambda name, timeout_ms: SerialLink(port, 123, timeout_ms))
+    desktop.signals[10_000_000] = [1]
+    program = validate_program({
+        "ir_version": 1, "project_id": "hid-key",
+        "workflows": {"tap": {"steps": [{"op": "key_tap", "key": "LEFT", "hold_ns": 100_000_000}]}},
+        "handlers": [{"id": "start", "workflow_id": "tap", "event": {"type": "project_start"}}],
+    })
+    pressed = []
+
+    def control():
+        if port.device.pressed_keys:
+            pressed.append(port.device.pressed_keys)
+
+    result = run_live(program, desktop, 1, 200_000_000, clock=clock, control=control, hid_port="COM9")
+    assert result["termination"] == "stopped" and not result["errors"]
+    assert pressed and all(keys == {(7, 0x50)} for keys in pressed)
+    assert port.closed and not port.device.pressed_keys and not desktop.events
+
+
+@pytest.mark.parametrize("lost_ack", [False, True])
+def test_hid_disconnect_releases_only_session_inputs_with_windows(monkeypatch, lost_ack):
+    from test_hid_serial_link import SimulatorPort
+
+    class CleanupDesktop(Desktop):
+        def cursor_over(self, target):
+            return True
+
+        def send_mouse_up(self, button):
+            self.events.append((self.clock.now_ns, "mouse_up", button))
+
+    clock = PollClock()
+    desktop = CleanupDesktop(clock)
+    port = SimulatorPort()
+    write = port.write
+    parser = FrameParser()
+
+    def write_until_disconnect(data):
+        for frame in parser.feed(data):
+            if frame.opcode is Opcode.HEARTBEAT and not lost_ack:
+                raise OSError("USB disconnected")
+            if frame.opcode is Opcode.INPUT_EVENT and frame.payload == b"\x02\x01\x01" and lost_ack:
+                port.drop_reply = True
+        return write(data)
+
+    port.write = write_until_disconnect
+    monkeypatch.setattr("macro_studio.live.open_port", lambda name, timeout_ms: SerialLink(port, 123, timeout_ms))
+    program = validate_program({
+        "ir_version": 1, "project_id": "usb-removal",
+        "workflows": {
+            "key": {"steps": [{"op": "key_tap", "key": "A", "hold_ns": 1_000_000_000}]},
+            "mouse": {"steps": [{"op": "mouse_click", "button": "left", "hold_ns": 1_000_000_000}]},
+        },
+        "handlers": [{"id": name, "workflow_id": name, "event": {"type": "project_start"}}
+                     for name in ("key", "mouse")],
+    })
+    if not lost_ack:
+        with pytest.raises(OSError, match="USB disconnected"):
+            run_live(program, desktop, 1, 2_000_000_000, clock=clock, hid_port="COM9")
+    else:
+        result = run_live(program, desktop, 1, 2_000_000_000, clock=clock, hid_port="COM9")
+        assert result["termination"] == "input_error"
+    assert [event[1:] for event in desktop.events] == [("up", "scan:1E"), ("mouse_up", "left")]
+    assert port.closed
 
 
 @pytest.mark.parametrize("frequency", [100, 200])

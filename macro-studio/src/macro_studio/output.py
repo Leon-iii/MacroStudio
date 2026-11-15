@@ -60,6 +60,9 @@ class UnsupportedCapability(ValueError):
 FAKE_PROFILE = OutputProfile("fake", OutputKind.FAKE)
 SENDINPUT_PROFILE = OutputProfile("sendinput", OutputKind.SENDINPUT)
 DESKTOP_CAPABILITIES = BackendCapabilities(keyboard=True, mouse_buttons=True, mouse_absolute=True)
+FAKE_CAPABILITIES = BackendCapabilities(
+    keyboard=True, mouse_buttons=True, mouse_relative=True, mouse_absolute=True, timed_batch=True,
+)
 
 _STEP_CAPABILITIES = {
     "key_tap": ("keyboard",),
@@ -67,6 +70,7 @@ _STEP_CAPABILITIES = {
     "mouse_click": ("mouse_buttons",),
     "mouse_move": ("mouse_absolute",),
     "mouse_click_at": ("mouse_absolute", "mouse_buttons"),
+    "timed_batch": ("timed_batch",),
 }
 
 
@@ -78,6 +82,13 @@ def _validate_steps(steps: list[dict], path: str, capabilities: BackendCapabilit
                 block_id = step.get("block_id")
                 source = f"{location} (block {block_id})" if block_id else location
                 raise UnsupportedCapability(f"{source}: output does not support {capability}")
+        if step["op"] == "timed_batch":
+            for edge in step["events"]:
+                action = edge["action"]
+                capability = ("keyboard" if action.startswith("key") else
+                              "mouse_relative" if action == "mouse_move" else "mouse_buttons")
+                if not getattr(capabilities, capability):
+                    raise UnsupportedCapability(f"{location}: timed batch requires {capability}")
         for branch in ("steps", "then", "else"):
             if branch in step:
                 _validate_steps(step[branch], f"{location}.{branch}", capabilities)
@@ -96,7 +107,7 @@ class OutputRouter:
             if kind is OutputKind.EXTERNAL_HID:
                 if mode is None:
                     raise ValueError("external_hid output requires a HID mode")
-                if mode != HidMode.STREAMING:
+                if mode not in (HidMode.STREAMING, HidMode.ONBOARD):
                     raise ValueError(f"unsupported HID mode: {mode}")
             elif mode is not None:
                 raise ValueError("HID mode requires external_hid output")
@@ -106,6 +117,9 @@ class OutputRouter:
         route = self._routes.get(kind)
         if route is None:
             raise ValueError(f"output route unavailable: {kind.value}")
+        if (kind is OutputKind.EXTERNAL_HID and config.profile.hid_mode == HidMode.ONBOARD
+                and not route.capabilities.onboard_tap_train):
+            raise ValueError("unsupported HID mode: onboard requires TAP_TRAIN capability")
         for name, workflow in program["workflows"].items():
             _validate_steps(workflow["steps"], f"workflows.{name}.steps", route.capabilities)
         return OutputSession(kind, route.create_backend(), route.capabilities)

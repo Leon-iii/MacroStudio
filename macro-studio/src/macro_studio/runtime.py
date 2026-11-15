@@ -1,5 +1,5 @@
 from collections import ChainMap, deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
 from heapq import heapify, heappop, heappush
 from itertools import count, takewhile
@@ -16,6 +16,8 @@ YIELD_NS = 1_000_000
 SECOND_NS = 1_000_000_000
 STATE_CHECK_NS = 200_000_000
 POINTER_STEP_NS = 16_000_000
+POINTER_CORRECTION_NS = 600_000_000
+POINTER_CORRECTION_STEPS = 32
 KEYBOARD_RETRY_NS = 5_000_000
 MODIFIER_RELEASE_TIMEOUT_NS = 2_000_000_000
 
@@ -77,6 +79,13 @@ class Runtime:
         self.before_press: Callable[[str], None] | None = None
         self.modifiers_pressed: Callable[[], bool] | None = None
         self.before_move: Callable[[tuple[int, int]], None] | None = None
+        self.send_pointer_delta: Callable[[tuple[int, int]], None] | None = None
+        self.onboard_taps = None
+        self.onboard_done: Callable[[int], None] | None = None
+        self.batch_done: Callable[[int], None] | None = None
+        self._onboard_owner: Task | None = None
+        self._batch_active = False
+        self._batch_held: set[str] = set()
         self.before_block: Callable[[dict], None] | None = None
         self.read_sensor: Callable[[str], bool] | None = None
         self.read_sensor_at: Callable[[str, tuple[int, ...]], bool] | None = None
@@ -330,6 +339,20 @@ class Runtime:
 
     def _drop(self, task: Task) -> None:
         del self._active[task]
+        if self._onboard_owner is task:
+            self._onboard_owner = None
+            try:
+                if self.onboard_taps is not None:
+                    self.onboard_taps.cancel_job()
+            except (OSError, RuntimeError) as error:
+                self._report_input_failure(task, InputFault(f"onboard cancel failed: {error}"))
+            self._batch_active = False
+            for key in sorted(self._batch_held):
+                try:
+                    self._batch_edge(key, False, self.clock.now_ns)
+                except InputFault as error:
+                    self._report_input_failure(task, error)
+            self._batch_held.clear()
         if self._pointer_owner is task:
             self._pointer_owner = None
         self._cleanup_key(task)
@@ -445,18 +468,21 @@ class Runtime:
                     yield from self._move_pointer(task, step, scope, self._duration_ns(step, scope))
                 case "key_tap" | "mouse_click" | "mouse_click_at":
                     hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
+                    click_position = None
                     if step["op"] == "key_tap":
                         yield from self._wait_for_modifiers()
                     if step["op"] == "mouse_click_at":
-                        yield from self._move_pointer(task, step, scope, 0)
+                        click_position = yield from self._move_pointer(task, step, scope, 0)
                     pressed_at = self.clock.now_ns
                     key = step["key"] if step["op"] == "key_tap" else "mouse:" + step["button"]
-                    self._press(task, key, pressed_at)
+                    self._press(task, key, pressed_at, click_position=click_position)
                     release_at = self.clock.now_ns + hold_ns
                     yield release_at
                     self._release(task, release_at)
                 case "tap_sequence":
                     yield from self._tap_sequence(task, step, scope)
+                case "timed_batch":
+                    yield from self._timed_batch(task, step["events"])
 
     def _wait_for_modifiers(self) -> Iterator[int]:
         if self.modifiers_pressed is None:
@@ -481,8 +507,8 @@ class Runtime:
             raise TaskFault(f"{step['op']}_duration", "hold duration must be positive")
         return nanoseconds
 
-    def _move_pointer(self, task: Task, step: dict, scope: dict, duration_ns: int) -> Iterator[int]:
-        if self._pointer_owner is not None or any(key.startswith("mouse:") for key in self._owners):
+    def _move_pointer(self, task: Task, step: dict, scope: dict, duration_ns: int) -> Generator[int, None, tuple[int, int]]:
+        if self._batch_active or self._pointer_owner is not None or any(key.startswith("mouse:") for key in self._owners):
             raise TaskFault("input_conflict", "mouse pointer or button is already in use")
         x = round(self._evaluate(step["position"]["x"], scope))
         y = round(self._evaluate(step["position"]["y"], scope))
@@ -492,10 +518,10 @@ class Runtime:
         if self.before_move is not None:
             self.before_move(destination)
         if not duration_ns:
-            self._send(destination, "mouse_move", self.clock.now_ns, self.backend.send_mouse_move)
-            if step["op"] == "mouse_click_at" and self._pointer_position() != destination:
-                raise TaskFault("pointer_off_position", "mouse pointer did not reach the requested coordinates")
-            return
+            self._pointer_owner = task
+            yield from self._finish_pointer_move(destination, self.clock.now_ns)
+            self._pointer_owner = None
+            return destination
 
         self._pointer_owner = task
         origin = self._pointer_position()
@@ -508,14 +534,41 @@ class Runtime:
                 self.before_move(destination)
             elapsed = min(duration_ns, self.clock.now_ns - start)
             if elapsed == duration_ns:
-                self._send(destination, "mouse_move", deadline, self.backend.send_mouse_move)
+                yield from self._finish_pointer_move(destination, deadline)
                 self._pointer_owner = None
-                return
+                return destination
             fraction = elapsed / duration_ns
             x = round(origin[0] + (destination[0] - origin[0]) * fraction)
             y = round(origin[1] + (destination[1] - origin[1]) * fraction)
             self._send((x, y), "mouse_move", deadline, self.backend.send_mouse_move)
             deadline = min(end, start + (elapsed // POINTER_STEP_NS + 1) * POINTER_STEP_NS)
+
+    def _finish_pointer_move(self, destination: tuple[int, int], scheduled: int) -> Iterator[int]:
+        if self.send_pointer_delta is None:
+            self._send(destination, "mouse_move", scheduled, self.backend.send_mouse_move)
+            return
+
+        deadline = self.clock.now_ns + POINTER_CORRECTION_NS
+        limits = [127, 127]
+        previous = (0, 0)
+        for attempt in range(POINTER_CORRECTION_STEPS + 1):
+            if self.before_move is not None:
+                self.before_move(destination)
+            x, y = self._pointer_position()
+            delta = (destination[0] - x, destination[1] - y)
+            if delta == (0, 0):
+                return
+            if attempt == POINTER_CORRECTION_STEPS or self.clock.now_ns >= deadline:
+                break
+            report = []
+            for axis, error in enumerate(delta):
+                if error * previous[axis] < 0:
+                    limits[axis] = max(1, limits[axis] // 2)
+                report.append(max(-limits[axis], min(limits[axis], error)))
+            previous = delta
+            self._send((report[0], report[1]), "mouse_move", self.clock.now_ns, self.send_pointer_delta)
+            yield min(deadline, self.clock.now_ns + POINTER_STEP_NS)
+        raise TaskFault("pointer_off_position", "mouse pointer did not reach the requested coordinates")
 
     def _pointer_position(self) -> tuple[int, int]:
         try:
@@ -543,6 +596,9 @@ class Runtime:
         if hold_ns * frequency >= SECOND_NS:
             raise TaskFault("tap_sequence_duration", "hold must be shorter than the period")
         yield from self._wait_for_modifiers()
+        if self.onboard_taps is not None:
+            yield from self._onboard_train(task, step["key"], frequency, hold_ns, count)
+            return
         origin = self.clock.now_ns
         tick = 0
         while tick < count:
@@ -562,17 +618,99 @@ class Runtime:
             self._release(task, release_at)
             tick += 1
 
+    def _onboard_train(self, task: Task, key: str, frequency: int, hold_ns: int, count: int) -> Iterator[int]:
+        if self._onboard_owner is not None or any(not item.startswith("mouse:") for item in self._owners):
+            raise TaskFault("input_conflict", "keyboard is occupied by another task")
+        period_us = (1_000_000 + frequency - 1) // frequency
+        hold_us = (hold_ns + 999) // 1000
+        if not 0 < hold_us < period_us:
+            raise TaskFault("tap_sequence_duration", "onboard hold must be at least 1 microsecond and less than the period")
+        if self.before_press is not None:
+            self.before_press(key)
+        self._onboard_owner = task
+        try:
+            self.onboard_taps.start_tap_train(key, period_us, hold_us, count)
+            yield from self._await_job(count, period_us * count, self.onboard_done)
+        except (OSError, RuntimeError) as error:
+            raise InputFault(str(error)) from error
+
+    def _await_job(self, count: int, duration_us: int, completed) -> Iterator[int]:
+        deadline = self.clock.now_ns + duration_us * 1000 + 1_500_000_000
+        while self.clock.now_ns < deadline:
+            actual = self.onboard_taps.job_count()
+            if actual is not None:
+                self._onboard_owner = None
+                self._batch_active = False
+                if actual != count:
+                    raise InputFault(f"onboard count mismatch: expected {count}, device reported {actual}")
+                if completed is not None:
+                    completed(actual)
+                return
+            yield min(deadline, self.clock.now_ns + 8_000_000)
+        raise InputFault("onboard job completion timed out")
+
+    def _timed_batch(self, task: Task, events: list[dict]) -> Iterator[int]:
+        if self._onboard_owner is not None or self._pointer_owner is not None or self._owners:
+            raise TaskFault("input_conflict", "another task owns an input needed by the timed batch")
+        self._onboard_owner = task
+        self._batch_active = True
+        if self.onboard_taps is not None:
+            try:
+                self.onboard_taps.queue_batch(events)
+                if self.before_press is not None:
+                    for edge in events:
+                        self.before_press(edge["key"] if "key" in edge else "mouse:batch")
+                self.onboard_taps.start_batch()
+                yield from self._await_job(len(events), events[-1]["offset_us"], self.batch_done)
+            except (OSError, RuntimeError) as error:
+                raise InputFault(str(error)) from error
+            return
+
+        origin = self.clock.now_ns
+        for edge in events:
+            deadline = origin + edge["offset_us"] * 1000
+            if self.clock.now_ns < deadline:
+                yield deadline
+            if edge["action"] == "mouse_move":
+                x, y = self._pointer_position()
+                self._send((x + edge["dx"], y + edge["dy"]), "mouse_move", deadline, self.backend.send_mouse_move)
+                continue
+            key = edge["key"] if "key" in edge else "mouse:" + edge["button"]
+            down = edge["action"].endswith("_down")
+            if down:
+                self._batch_held.add(key)
+            self._batch_edge(key, down, deadline)
+            if not down:
+                self._batch_held.remove(key)
+        self._batch_active = False
+        self._onboard_owner = None
+
+    def _batch_edge(self, key: str, down: bool, scheduled: int) -> None:
+        if key.startswith("mouse:"):
+            send = self.backend.send_mouse_down if down else self.backend.send_mouse_up
+            self._send(key[6:], "mouse_down" if down else "mouse_up", scheduled, send)
+        else:
+            send = self.backend.send_key_down if down else self.backend.send_key_up
+            self._send(key, "key_down" if down else "key_up", scheduled, send)
+
     def _sequence_integer(self, step: dict, scope: dict, name: str, upper: int) -> int:
         value = self._evaluate(step[name], scope)
         if not 1 <= value <= upper or value != int(value):
             raise TaskFault(f"tap_sequence_{name}", f"{name} must be an integer from 1 to {upper}")
         return int(value)
 
-    def _press(self, task: Task, key: str, scheduled: int) -> None:
+    def _press(self, task: Task, key: str, scheduled: int, *, click_position: tuple[int, int] | None = None) -> None:
+        if self._batch_active or (self._onboard_owner is not None and not key.startswith("mouse:")):
+            raise TaskFault("input_conflict", "input is occupied by an onboard job")
         if key in self._owners or (key.startswith("mouse:") and self._pointer_owner is not None):
             raise TaskFault("input_conflict", f"input is already held: {key}")
         if self.before_press is not None:
             self.before_press(key)
+        if click_position is not None:
+            if self._pointer_position() != click_position:
+                raise TaskFault("pointer_off_position", "mouse pointer did not reach the requested coordinates")
+            if self.before_move is not None:
+                self.before_move(click_position)
         if key.startswith("mouse:"):
             self._send(key[6:], "mouse_down", scheduled, self.backend.send_mouse_down)
         else:

@@ -53,7 +53,7 @@ Blockly.fieldRegistry.register("field_studio_colour", StudioColourField);
 
 let listenForKey;
 const hotkeyBlocks = new Set(["ms_hotkey", "ms_state_hotkey"]);
-const singleKeyBlocks = new Set(["ms_key_tap", "ms_tap_sequence"]);
+const singleKeyBlocks = new Set(["ms_key_tap", "ms_tap_sequence", "ms_batch_key"]);
 const directionLabels = new Map([["LEFT", "←"], ["RIGHT", "→"], ["UP", "↑"], ["DOWN", "↓"]]);
 
 function keyLabel(value) {
@@ -75,28 +75,7 @@ class StudioKeyField extends Blockly.FieldTextInput {
 
   initView() {
     super.initView();
-    const root = this.getSvgRoot();
-    root.classList.add("msKeyField");
-    const {createSvgElement} = Blockly.utils.dom;
-    this.divider = createSvgElement("line", {class: "msKeyDivider"}, root);
-    this.listenLabel = createSvgElement("text", {class: "blocklyText blocklyFieldText msKeyListen"}, root);
-    const baseline = this.getTextElement().getAttribute("dominant-baseline");
-    if (baseline) this.listenLabel.setAttribute("dominant-baseline", baseline);
-    this.listenLabel.textContent = "키 듣기";
-  }
-
-  render_() {
-    super.render_();
-    const padding = this.getConstants().FIELD_BORDER_RECT_X_PADDING;
-    const dividerX = this.size_.width;
-    this.listenLabel.setAttribute("x", dividerX + padding);
-    this.listenLabel.setAttribute("y", this.getTextElement().getAttribute("y"));
-    this.divider.setAttribute("x1", dividerX);
-    this.divider.setAttribute("x2", dividerX);
-    this.divider.setAttribute("y1", 5);
-    this.divider.setAttribute("y2", this.size_.height - 5);
-    this.size_.width += Blockly.utils.dom.getTextWidth(this.listenLabel) + 2 * padding;
-    this.positionBorderRect_();
+    this.getSvgRoot().classList.add("msKeyField");
   }
 
   showEditor_() {
@@ -133,6 +112,14 @@ class ImageAssetField extends Blockly.FieldDropdown {
 }
 Blockly.fieldRegistry.register("field_studio_image_asset", ImageAssetField);
 
+const batchEdge = {previousStatement: "BatchEdge", nextStatement: "BatchEdge", inputsInline: true};
+const batchOffset = () => number("OFFSET", 0, 0, 5000, 1);
+const batchAction = () => dropdown("ACTION", [["누르기", "down"], ["해제하기", "up"]]);
+
+Blockly.Extensions.register("studio_duration_default", function () {
+  this.setFieldValue("sec", "UNIT");
+});
+
 Blockly.defineBlocksWithJsonArray([
   hat("start", "event", "%1 %2 우선순위 %3 조건 %4 %5",
     [label("TITLE", "프로젝트 시작"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
@@ -160,11 +147,21 @@ Blockly.defineBlocksWithJsonArray([
   statement("tap_sequence", "input", "%1 키 연타 %2 Hz · %3 · %4 회",
     [value("KEY", "Key"), value("HZ", "Number"), value("DURATION", "Duration"), value("COUNT", "Number")],
     {inputsInline: true}),
+  statement("timed_batch", "time", "예약 입력 묶음 (Timed Batch)", [],
+    {message1: "%1", args1: [workflowList("EVENTS", "BatchEdge")]}),
+  statement("batch_key", "time", "%1 ms에 %2 키 %3",
+    [batchOffset(), value("KEY", "Key"), batchAction()], batchEdge),
+  statement("batch_button", "time", "%1 ms에 %2 버튼 %3",
+    [batchOffset(), dropdown("BUTTON", [["왼쪽", "left"], ["오른쪽", "right"], ["가운데", "middle"]]),
+     batchAction()], batchEdge),
+  statement("batch_move", "time", "%1 ms에 마우스 ΔX %2 ΔY %3",
+    [batchOffset(), number("DX", 0, -127, 127, 1), number("DY", 0, -127, 127, 1)], batchEdge),
   statement("wait", "time", "%1 ms만큼 기다리기", [number("MS", 100, 0, 86400000, 0.001)]),
   statement("wait_time", "time", "%1 만큼 기다리기", [value("DURATION", "Duration")], {inputsInline: true}),
   {...expression("duration", "%1 %2", [value("VALUE", "Number"),
-    dropdown("UNIT", [["sec", "sec"], ["ms", "ms"], ["min", "min"]])], "Duration"),
-    colour: palette.time, inputsInline: true, tooltip: "숫자와 단위를 묶어 시간을 지정합니다."},
+    dropdown("UNIT", [["ms", "ms"], ["sec", "sec"], ["min", "min"]])], "Duration"),
+    colour: palette.time, inputsInline: true, extensions: ["studio_duration_default"],
+    tooltip: "숫자와 단위를 묶어 시간을 지정합니다."},
   statement("repeat", "control", "%1 회 반복", [value("COUNT", "Number")],
     {message1: "%1", args1: [stack("BODY")], inputsInline: true}),
   statement("forever", "control", "계속 반복", [], {message1: "%1", args1: [stack("BODY")]}),
@@ -239,7 +236,7 @@ const categories = [
   ["이벤트", "event", ["start", "hotkey", "interval", "custom", "emit_event"]],
   ["키보드", "input", ["key", "key_tap", "tap_sequence"]],
   ["마우스", "input", ["position", "mouse_move", "mouse_click_at", "mouse_click"]],
-  ["시간", "time", ["duration", "wait_time"]],
+  ["시간", "time", ["duration", "wait_time", "timed_batch", "batch_key", "batch_button", "batch_move"]],
   ["제어", "control", ["repeat", "forever", "while", "if_only", "if", "break", "continue", "end"]],
   ["변수", "variable", ["set", "variable", "text"]],
   ["산술 연산", "arithmetic", ["number", "arithmetic", "random_float"]],
@@ -271,6 +268,7 @@ const toolboxInputs = {
   key_tap: {...defaultHold, KEY: keyShadow("A")},
   mouse_click: defaultHold,
   tap_sequence: {KEY: keyShadow("A"), HZ: numberShadow(100), DURATION: durationInput(2, "ms"), COUNT: numberShadow(10)},
+  batch_key: {KEY: keyShadow("A")},
   position: positionInputs,
   wait_time: {DURATION: defaultDuration},
   mouse_move: {POSITION: defaultPosition, DURATION: defaultDuration},

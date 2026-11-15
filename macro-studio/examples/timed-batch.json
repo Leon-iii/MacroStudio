@@ -1,0 +1,29 @@
+{
+  "ir_version": 1,
+  "project_id": "timed-batch-example",
+  "workflows": {
+    "timeline": {
+      "steps": [
+        {
+          "op": "timed_batch",
+          "events": [
+            {"offset_us": 0, "action": "mouse_move", "dx": 12, "dy": 0},
+            {"offset_us": 40000, "action": "mouse_move", "dx": 0, "dy": 12}
+          ]
+        },
+        {
+          "op": "timed_batch",
+          "events": [
+            {"offset_us": 0, "action": "key_down", "key": "A"},
+            {"offset_us": 40000, "action": "key_up", "key": "A"},
+            {"offset_us": 70000, "action": "mouse_down", "button": "left"},
+            {"offset_us": 110000, "action": "mouse_up", "button": "left"}
+          ]
+        }
+      ]
+    }
+  },
+  "handlers": [
+    {"id": "start", "workflow_id": "timeline", "event": {"type": "project_start"}}
+  ]
+}

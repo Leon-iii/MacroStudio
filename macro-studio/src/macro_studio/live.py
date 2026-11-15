@@ -1,11 +1,18 @@
+from contextlib import ExitStack
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter_ns, sleep
 
+from .external_hid.backend import HidBackend, key_usage
+from .external_hid.serial_link import open_port
 from .ir import DEFAULT_STOP_HOTKEY
-from .output import DESKTOP_CAPABILITIES, SENDINPUT_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
+from .output import (
+    DESKTOP_CAPABILITIES, SENDINPUT_PROFILE, HidMode, OutputKind, OutputProfile,
+    OutputRoute, OutputRouter, RunConfig,
+)
 from .runtime import Runtime, TaskFault
 
 FOCUS_TIMEOUT_NS = 5_000_000_000
@@ -67,16 +74,22 @@ def _keys(steps):
     for step in steps:
         if step["op"] in ("key_tap", "tap_sequence"):
             yield step["key"]
+        if step["op"] == "timed_batch":
+            yield from (edge["key"] for edge in step["events"] if "key" in edge)
         for branch in ("steps", "then", "else"):
             yield from _keys(step.get(branch, ()))
 
 
 def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
              stop_hotkey: str = DEFAULT_STOP_HOTKEY, metrics: bool = False,
-             status=print, clock=None, control=None, on_state=None, on_runtime=None) -> dict:
+             status=print, clock=None, control=None, on_state=None, on_runtime=None,
+             hid_port: str | None = None, hid_onboard: bool = False) -> dict:
     clock = DeadlineClock() if clock is None else clock
-    router = OutputRouter({OutputKind.SENDINPUT: OutputRoute(DESKTOP_CAPABILITIES, lambda: desktop)})
-    session = router.bind(program, RunConfig(SENDINPUT_PROFILE, dry_run=False, armed=True))
+    routes = {OutputKind.SENDINPUT: OutputRoute(DESKTOP_CAPABILITIES, lambda: desktop)}
+    profile = SENDINPUT_PROFILE
+    hid = None
+    if hid_onboard and not hid_port:
+        raise ValueError("onboard mode requires a selected HID port")
     target = desktop.target(hwnd)
     if stop_hotkey in (RESUME_HOTKEY, PAUSE_HOTKEY):
         raise ValueError("emergency stop conflicts with a session control hotkey")
@@ -100,7 +113,8 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
     resume_until = None
     pause_pending = False
 
-    with desktop.hotkeys(mapping) as failed:
+    # Close the device link before clearing unresolved HID presses on Windows.
+    with desktop.hotkeys(mapping) as failed, ExitStack() as cleanup, ExitStack() as outputs:
         if 1 in failed:
             raise ValueError(f"could not register emergency stop hotkey {stop_hotkey}")
         for index in failed:
@@ -109,6 +123,8 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
         registered_keys = tuple(registered.values())
         for workflow in program["workflows"].values():
             for key in set(_keys(workflow["steps"])):
+                if hid_port is not None:
+                    key_usage(key)
                 if desktop.unmodified_hotkey_conflict(key, registered_keys):
                     raise ValueError(f"synthetic input conflicts with a registered hotkey: {key}")
         available = {key for index, key in registered.items() if index >= PROJECT_HOTKEY_START}
@@ -131,6 +147,23 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
                 raise ValueError("target did not become foreground within 5 seconds")
             clock.advance_to(deadline)
 
+        if hid_port is not None:
+            link = outputs.enter_context(open_port(hid_port, timeout_ms=75))
+            hid = HidBackend(link, desktop, clock, link.inspect())
+            cleanup.callback(hid.release_stuck_inputs)
+            profile = OutputProfile("external_hid", OutputKind.EXTERNAL_HID,
+                                    HidMode.ONBOARD if hid_onboard else HidMode.STREAMING)
+            routes[OutputKind.EXTERNAL_HID] = OutputRoute(
+                replace(hid.capabilities, timed_batch=hid_onboard and hid.capabilities.timed_batch), lambda: hid)
+        session = OutputRouter(routes).bind(program, RunConfig(profile, dry_run=False, armed=True))
+        if hid is not None:
+            if (control and control() == "stop") or 1 in desktop.poll_hotkeys():
+                return {"termination": "stopped", "events": [], "errors": [], "missed_ticks": 0,
+                        "stop_latency_ns": None, "elapsed_ns": None}
+            if not desktop.focused(target):
+                raise ValueError("target lost focus during HID handshake")
+            hid.arm()
+
         if on_state:
             on_state("RUNNING")
 
@@ -140,13 +173,18 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             signals = desktop.poll_hotkeys()
             if request == "stop" or 1 in signals or not desktop.alive(target):
                 return "stop", []
-            if not paused and (request == "pause" or 3 in signals or pause_pending or not desktop.focused(target)):
+            modifiers_during_job = hid_onboard and hid.job_active and desktop.modifiers_pressed()
+            pointer_outside = hid_onboard and hid.batch_uses_pointer and not desktop.cursor_over(target)
+            if not paused and (request == "pause" or 3 in signals or pause_pending or not desktop.focused(target)
+                               or modifiers_during_job or pointer_outside):
                 pause_pending = False
                 paused = True
                 if on_state:
                     on_state("PAUSED")
                 status(f"Paused. Resume: {RESUME_HOTKEY}. Emergency stop: {stop_hotkey}")
                 return "pause", []
+            if hid is not None:
+                hid.heartbeat()
             if paused:
                 if request == "resume" or 2 in signals:
                     resume_until = clock.now_ns + FOCUS_TIMEOUT_NS
@@ -190,6 +228,12 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
         runtime.before_press = before_press
         runtime.modifiers_pressed = desktop.modifiers_pressed
         runtime.before_move = before_move
+        if hid is not None and hid.capabilities.mouse_relative:
+            runtime.send_pointer_delta = hid.send_delta
+        if hid_onboard:
+            runtime.onboard_taps = hid
+            runtime.onboard_done = lambda count: status(f"Onboard TAP_TRAIN completed: {count} taps")
+            runtime.batch_done = lambda count: status(f"Timed Batch completed: {count} events")
         runtime.read_window = lambda state: desktop.window_state(target, state)
         if metrics:
             def record(scheduled_ns, actual_ns, action, inserted):

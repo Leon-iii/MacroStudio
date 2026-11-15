@@ -6,7 +6,7 @@ import sys
 
 from .backend import FakeInputBackend, VirtualClock
 from .ir import DEFAULT_STOP_HOTKEY, MAX_DURATION_NS, ValidationError, normalize_hotkey, validate_program
-from .output import DESKTOP_CAPABILITIES, FAKE_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
+from .output import FAKE_CAPABILITIES, FAKE_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
 from .runtime import Runtime
 
 NS_PER_MS = 1_000_000
@@ -50,12 +50,17 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--duration-ms", required=True, type=_ms)
     run.add_argument("--hotkey", metavar="MS:HOTKEY", action="append", type=_hotkey, default=[])
     commands.add_parser("windows")
+    devices = commands.add_parser("devices").add_subparsers(dest="device_command", required=True)
+    devices.add_parser("list")
+    devices.add_parser("probe").add_argument("--port", required=True)
     arm = commands.add_parser("arm")
     arm.add_argument("path", type=Path)
     arm.add_argument("--confirm-real-input", action="store_true", required=True)
     commands.add_parser("disarm").add_argument("path", type=Path)
     live = commands.add_parser("start")
     live.add_argument("path", type=Path)
+    live.add_argument("--hid-port", help="use External HID on the selected COM port")
+    live.add_argument("--hid-onboard", action="store_true", help="run repeated key taps on the HID device")
     bench = commands.add_parser("benchmark")
     bench.add_argument("--frequency", type=int, choices=(100, 200), required=True)
     bench.add_argument("--count", type=int, default=100)
@@ -65,6 +70,17 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--duration-ms", type=_ms, required=True)
         command.add_argument("--stop-hotkey", default=DEFAULT_STOP_HOTKEY)
     args = parser.parse_args(argv)
+
+    if args.command == "devices":
+        from .external_hid.serial_link import list_ports, probe_port
+
+        try:
+            result = list_ports() if args.device_command == "list" else probe_port(args.port)
+            print(json.dumps(result, indent=2))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"HID device: {exc}", file=sys.stderr)
+            return 2
 
     if args.command not in ("run", "validate"):
         try:
@@ -86,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
     clock = VirtualClock()
     backend = FakeInputBackend(clock)
-    router = OutputRouter({OutputKind.FAKE: OutputRoute(DESKTOP_CAPABILITIES, lambda: backend)})
+    router = OutputRouter({OutputKind.FAKE: OutputRoute(FAKE_CAPABILITIES, lambda: backend)})
     session = router.bind(program, RunConfig(FAKE_PROFILE))
     runtime = Runtime(program, clock, session.backend)
     runtime.run(args.duration_ms, args.hotkey)
@@ -127,6 +143,8 @@ def _windows_command(args) -> int:
         program, WindowsDesktop(), args.target, args.duration_ms,
         stop_hotkey=normalize_hotkey(args.stop_hotkey), metrics=args.command == "benchmark",
         status=lambda message: print(message, file=sys.stderr),
+        hid_port=getattr(args, "hid_port", None),
+        hid_onboard=getattr(args, "hid_onboard", False),
     )
     if args.command == "benchmark":
         report = summarize(args.frequency, result.pop("events"), result["missed_ticks"],

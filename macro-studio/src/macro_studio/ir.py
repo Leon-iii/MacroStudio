@@ -6,6 +6,8 @@ import re
 MAX_REPEAT_COUNT = 1_000_000
 MAX_CALL_DEPTH = 32
 MAX_DURATION_NS = 86_400_000_000_000
+MAX_BATCH_EVENTS = 8
+MAX_BATCH_US = 5_000_000
 DURATION_UNIT_NS = {"ms": 1_000_000, "sec": 1_000_000_000, "min": 60_000_000_000}
 DEFAULT_STOP_HOTKEY = "CTRL+ALT+SHIFT+F11"
 SCREEN_SENSOR_OPS = ("pixel_color", "region_image", "region_text")
@@ -245,6 +247,54 @@ def _integer_expression(value, variables, lower, upper, path):
     return _integer(value, lower, upper, path)
 
 
+def _batch_events(raw, path):
+    events = _array(raw, path)
+    if not 1 <= len(events) <= MAX_BATCH_EVENTS:
+        raise ValidationError(f"{path}: expected 1 to {MAX_BATCH_EVENTS} events")
+    held = set()
+    kinds = set()
+    normalized = []
+    previous = 0
+    for index, item in enumerate(events):
+        location = f"{path}[{index}]"
+        item = _object(item, location)
+        at = _integer(item.get("offset_us"), previous, MAX_BATCH_US, f"{location}.offset_us")
+        previous = at
+        action = item.get("action")
+        edge = {"offset_us": at, "action": action}
+        if action == "mouse_move":
+            for axis in ("dx", "dy"):
+                edge[axis] = _integer(item.get(axis), -127, 127, f"{location}.{axis}")
+            kinds.add("move")
+        elif action in ("key_down", "key_up", "mouse_down", "mouse_up"):
+            if action.startswith("key"):
+                edge["key"] = value = _key(item.get("key"), location)
+                identifier = (False, value)
+            else:
+                value = item.get("button")
+                if value not in ("left", "right", "middle"):
+                    raise ValidationError(f"{location}: invalid mouse button")
+                edge["button"] = value
+                identifier = (True, value)
+                kinds.add("click")
+            if action.endswith("_down"):
+                if identifier in held:
+                    raise ValidationError(f"{location}: input is already held")
+                held.add(identifier)
+            elif identifier not in held:
+                raise ValidationError(f"{location}: input was not pressed")
+            else:
+                held.remove(identifier)
+        else:
+            raise ValidationError(f"{location}: invalid timed batch action")
+        normalized.append(edge)
+    if held:
+        raise ValidationError(f"{path}: every press must have a matching release")
+    if kinds == {"click", "move"}:
+        raise ValidationError(f"{path}: mouse movement and buttons must use separate batches")
+    return normalized
+
+
 def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loop=False):
     if depth > 32:
         raise ValidationError(f"{path}: block nesting exceeds 32")
@@ -276,6 +326,8 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             _duration(step.get("duration"), variables, location)
         elif op == "emit_event":
             step["name"] = _event_name(step.get("name"), location)
+        elif op == "timed_batch":
+            step["events"] = _batch_events(step.get("events"), f"{location}.events")
         elif op in ("mouse_click", "mouse_click_at"):
             if step.get("button") not in ("left", "right", "middle"):
                 raise ValidationError(f"{location}: invalid mouse button")

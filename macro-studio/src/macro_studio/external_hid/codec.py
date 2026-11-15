@@ -31,6 +31,7 @@ class Opcode(IntEnum):
     START_JOB = 0x09
     CANCEL_JOB = 0x0A
     GET_STATUS = 0x0B
+    QUEUE_BATCH = 0x0C
     ACK = 0x80
     NACK = 0x81
     HELLO_ACK = 0x82

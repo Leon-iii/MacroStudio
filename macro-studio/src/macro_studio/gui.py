@@ -3,9 +3,12 @@ from pathlib import Path
 import re
 import sys
 from tempfile import TemporaryDirectory
+from threading import Thread
 from uuid import uuid4
 
-from PySide6.QtCore import QByteArray, QIODevice, QObject, QPointF, QProcess, QSize, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QByteArray, QIODevice, QObject, QPointF, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl, Signal, Slot,
+)
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
@@ -13,22 +16,46 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngi
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 from .block_help import BlockHelp
 from .compiler import compile_project
+from .external_hid.serial_link import list_ports, probe_port
 from .image_assets import ImageAssetsDialog, asset_files, asset_references, validate_assets
 from .ir import normalize_hotkey
 from .key_capture import KeyCaptureDialog
 from .live import ArmStore
+from .output import HidMode, OutputKind
 from .sensors import sensor_specs
 
 ASSETS = Path(__file__).with_name("editor")
+
+
+def usb_selector(port):
+    vid, pid, serial = (port.get(field) for field in ("vid", "pid", "serial_number"))
+    if (type(vid) is int and 0 <= vid <= 0xFFFF and type(pid) is int and 0 <= pid <= 0xFFFF
+            and isinstance(serial, str) and serial.strip()):
+        return {"vid": vid, "pid": pid, "serial_number": serial}
+    return None
+
+
+def project_output(project):
+    profile = project.get("output_profile", {"output_kind": OutputKind.FAKE})
+    if not isinstance(profile, dict) or profile.get("output_kind") not in tuple(OutputKind):
+        raise ValueError("지원하지 않는 출력 프로필입니다.")
+    if profile.get("hid_mode", HidMode.STREAMING) not in tuple(HidMode):
+        raise ValueError("지원하지 않는 HID 실행 방식입니다.")
+    selector = profile.get("device_selector")
+    if selector is not None and (not isinstance(selector, dict) or usb_selector(selector) is None):
+        raise ValueError("출력 프로필의 USB 장치 식별 정보가 잘못되었습니다.")
+    return profile
+
+
 STATES = {"RUNNING": "실행 중", "PAUSED": "일시정지", "BREAKPOINT": "디버거에서 멈춤",
           "STOPPED": "정지", "ERROR": "오류"}
 STYLE = """
-QWidget { background: #f6f8fb; color: #19283b; font-family: 'Malgun Gothic'; font-size: 13px; }
+QWidget { background: #f6f8fb; color: #19283b; font-family: 'Malgun Gothic'; font-size: 9.75pt; }
 QMainWindow, QMenuBar { background: #f6f8fb; }
 QMenuBar { padding: 3px 12px; }
 QMenuBar::item:selected, QMenu::item:selected { background: #e1e9f5; }
@@ -42,8 +69,10 @@ QLabel#mode[armed="true"] { color: #733c0d; background: #f8ead4; }
 QPushButton, QComboBox, QLineEdit { background: #fff; border: 1px solid #b9c7d7; border-radius: 5px; padding: 6px 10px; min-height: 24px; }
 QPushButton:hover { background: #eef3fa; }
 QPushButton:focus, QLineEdit:focus, QComboBox:focus { border: 2px solid #2455cb; padding: 5px 9px; }
-QComboBox#targetWindow { padding-right: 26px; }
-QComboBox#targetWindow::drop-down { width: 24px; border: none; background: transparent; }
+QComboBox[flatArrow="true"] { padding-right: 26px; }
+QComboBox[flatArrow="true"]::drop-down { width: 24px; border: none; background: transparent; }
+QLabel#hidStatus[connection="ready"] { color: #176248; }
+QLabel#hidStatus[connection="error"] { color: #912d37; }
 QPushButton[transportIcon="true"] { padding: 0; min-height: 0; border-radius: 7px; }
 QPushButton#transport { background: #234fbf; border-color: #234fbf; }
 QPushButton#transport:hover { background: #1a429f; }
@@ -52,7 +81,11 @@ QPushButton#transport[stopping="true"]:hover { background: #86232c; }
 QPushButton#arm[armed="true"] { background: #f8ead4; border-color: #ce9f61; }
 QPushButton[transportIcon="true"]:focus { border: 2px solid #4877e4; }
 QPushButton:disabled, QPushButton#transport:disabled { color: #576b82; background: #e8edf3; border-color: #d0d9e4; }
-QWidget#inspector { border-left: 1px solid #cbd5e1; }
+QScrollArea#inspector { border: 0; border-left: 1px solid #cbd5e1; }
+QScrollArea#inspector QScrollBar:vertical { background: #edf2f8; width: 10px; margin: 2px; }
+QScrollArea#inspector QScrollBar::handle:vertical { background: #a8b8cc; border-radius: 3px; min-height: 32px; }
+QScrollArea#inspector QScrollBar::add-line:vertical, QScrollArea#inspector QScrollBar::sub-line:vertical { height: 0; }
+QScrollArea#inspector QScrollBar::add-page:vertical, QScrollArea#inspector QScrollBar::sub-page:vertical { background: transparent; }
 QPlainTextEdit { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; padding: 6px; }
 QLabel#footer { color: #435670; padding: 6px 15px; border-top: 1px solid #cbd5e1; }
 """
@@ -85,7 +118,11 @@ def transport_icon(shape, color):
     return icon
 
 
-class TargetWindowComboBox(QComboBox):
+class FlatComboBox(QComboBox):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.setProperty("flatArrow", True)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         option = QStyleOptionComboBox()
@@ -174,6 +211,8 @@ def new_project(example=False):
 
 
 class Studio(QMainWindow):
+    hid_probe_result = Signal(int, str, object, str)
+
     def __init__(self):
         super().__init__()
         self.resize(1260, 790)
@@ -199,6 +238,16 @@ class Studio(QMainWindow):
         self.pending_output = b""
         self.last_error_block = ""
         self.editor_ready = False
+        self.hid_ports = {}
+        self.hid_devices = {}
+        self.checked_port = None
+        self.hid_issue = ""
+        self.probe_serial = 0
+        self.probing = False
+        self.running_hid_port = None
+        self.hid_timer = QTimer(self, interval=1500)
+        self.hid_timer.timeout.connect(self.load_hid_ports)
+        self.hid_probe_result.connect(self.finish_hid_probe)
         self.build()
         self.refresh()
 
@@ -231,6 +280,7 @@ class Studio(QMainWindow):
         identity_row = QHBoxLayout(identity)
         identity_row.setContentsMargins(0, 0, 0, 0)
         identity_row.addWidget(QLabel("Macro Studio", objectName="title"))
+        identity_row.addSpacing(10)
         self.mode = QLabel(objectName="mode")
         identity_row.addWidget(self.mode)
         row.addWidget(identity, 0, 0, Qt.AlignmentFlag.AlignLeft)
@@ -249,23 +299,13 @@ class Studio(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(0)
-        self.view = QWebEngineView()
-        page = EditorPage(self.view)
-        self.view.setPage(page)
-        self.requests = LocalRequests(page)
-        page.profile().setUrlRequestInterceptor(self.requests)
-        page.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
-        channel = QWebChannel(page)
-        channel.registerObject("bridge", self.bridge)
-        page.setWebChannel(channel)
-        self.bridge.loaded.connect(self.ready)
-        self.bridge.updated.connect(self.workspace_changed)
-        self.view.loadFinished.connect(self.page_loaded)
-        self.view.load(QUrl.fromLocalFile(str(ASSETS / "index.html")))
-        body.addWidget(self.view, 1)
+        body.addWidget(self.build_canvas(), 1)
 
-        inspector = QWidget(objectName="inspector")
-        inspector.setFixedWidth(276)
+        inspector_scroll = QScrollArea(objectName="inspector")
+        inspector_scroll.setFixedWidth(276)
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inspector = QWidget()
         side = QVBoxLayout(inspector)
         side.setContentsMargins(16, 18, 16, 14)
         side.setSpacing(9)
@@ -280,9 +320,9 @@ class Studio(QMainWindow):
         self.stats.setAccessibleName("실행 통계")
         side.addWidget(self.stats)
         form = QFormLayout()
-        self.targets = TargetWindowComboBox(objectName="targetWindow")
+        self.targets = FlatComboBox(objectName="targetWindow")
         self.targets.setAccessibleName("대상 창")
-        self.targets.setMinimumWidth(140)
+        self.targets.setMinimumWidth(100)
         self.targets.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         target_row = QHBoxLayout()
         target_row.setSpacing(6)
@@ -291,6 +331,34 @@ class Studio(QMainWindow):
         self.set_icon_action(self.target_button, "refresh", "창 목록 새로 고침")
         target_row.addWidget(self.target_button)
         form.addRow("대상 창", target_row)
+        self.output = FlatComboBox(objectName="outputMethod")
+        self.output.setAccessibleName("출력 방식")
+        self.output.addItem("드라이런", OutputKind.FAKE)
+        self.output.addItem("SendInput", OutputKind.SENDINPUT)
+        self.output.addItem("External HID", OutputKind.EXTERNAL_HID)
+        form.addRow("출력 방식", self.output)
+        self.hid_port = FlatComboBox(objectName="hidPort")
+        self.hid_port.setAccessibleName("COM 포트")
+        port_row = QHBoxLayout()
+        port_row.setSpacing(6)
+        port_row.addWidget(self.hid_port, 1)
+        self.hid_refresh = self.icon_button("refreshHid", lambda: self.load_hid_ports(recheck=True), size=38)
+        self.set_icon_action(self.hid_refresh, "refresh", "COM 포트 새로 고침")
+        port_row.addWidget(self.hid_refresh)
+        form.addRow("COM 포트", port_row)
+        self.hid_mode = FlatComboBox(objectName="hidMode")
+        self.hid_mode.setAccessibleName("HID 실행 방식")
+        self.hid_mode.addItem("Streaming", HidMode.STREAMING)
+        self.hid_mode.addItem("Onboard", HidMode.ONBOARD)
+        form.addRow("HID 실행", self.hid_mode)
+        self.hid_status = QLabel(objectName="hidStatus", wordWrap=True)
+        self.hid_status.setTextFormat(Qt.TextFormat.PlainText)
+        form.addRow(self.hid_status)
+        self.output_form = form
+        self.port_row = port_row
+        self.output.currentIndexChanged.connect(self.output_changed)
+        self.hid_port.currentIndexChanged.connect(self.hid_selection_changed)
+        self.hid_mode.currentIndexChanged.connect(self.hid_mode_changed)
         self.globals = QLineEdit("{}")
         self.globals.setToolTip('전역 변수 초기값 JSON. 예: {"enabled": true}')
         self.globals.textEdited.connect(self.modified)
@@ -314,6 +382,7 @@ class Studio(QMainWindow):
         side.addSpacing(12)
         side.addWidget(QLabel("실행 로그", objectName="section"))
         self.logs = QPlainTextEdit(readOnly=True)
+        self.logs.setMinimumHeight(88)
         self.logs.setMaximumBlockCount(200)
         self.logs.setAccessibleName("실행 로그")
         self.logs.setPlaceholderText("검증 및 실행 결과가 여기에 표시됩니다.")
@@ -321,11 +390,28 @@ class Studio(QMainWindow):
         self.jump = self.button("오류 블록 보기", self.jump_to_error)
         self.jump.setEnabled(False)
         side.addWidget(self.jump)
-        body.addWidget(inspector)
+        inspector_scroll.setWidget(inspector)
+        body.addWidget(inspector_scroll)
         layout.addLayout(body, 1)
         self.footer = QLabel(objectName="footer")
         layout.addWidget(self.footer)
         self.load_targets()
+
+    def build_canvas(self):
+        self.view = QWebEngineView()
+        page = EditorPage(self.view)
+        self.view.setPage(page)
+        self.requests = LocalRequests(page)
+        page.profile().setUrlRequestInterceptor(self.requests)
+        page.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
+        channel = QWebChannel(page)
+        channel.registerObject("bridge", self.bridge)
+        page.setWebChannel(channel)
+        self.bridge.loaded.connect(self.ready)
+        self.bridge.updated.connect(self.workspace_changed)
+        self.view.loadFinished.connect(self.page_loaded)
+        self.view.load(QUrl.fromLocalFile(str(ASSETS / "index.html")))
+        return self.view
 
     @staticmethod
     def button(text, action, name=""):
@@ -400,7 +486,9 @@ class Studio(QMainWindow):
             return False
 
     def refresh(self):
-        armed = self.armed() if not self.running else self.session_mode == "live"
+        project_armed = self.armed()
+        explicit_dry_run = self.output.currentData() == OutputKind.FAKE
+        armed = self.session_mode == "live" if self.running else project_armed and not explicit_dry_run
         name = self.project["name"]
         changed = " • 저장 안 됨" if self.dirty else ""
         self.setWindowTitle(f"{name}{changed} | Macro Studio")
@@ -421,14 +509,172 @@ class Studio(QMainWindow):
         self.pause.setEnabled(self.running and self.session_state in ("RUNNING", "PAUSED", "BREAKPOINT"))
         resumable = self.session_state in ("PAUSED", "BREAKPOINT")
         self.set_icon_action(self.pause, "resume" if resumable else "pause", "재개" if resumable else "일시정지")
-        self.arm_button.setEnabled(bool(self.store) and not self.running)
-        self.set_style_state(self.arm_button, "armed", armed)
-        self.set_icon_action(self.arm_button, "armed" if armed else "arm", "ARM 해제" if armed else "ARM 설정")
+        self.arm_button.setEnabled(bool(self.store) and not self.running and (project_armed or not explicit_dry_run))
+        self.set_style_state(self.arm_button, "armed", project_armed)
+        self.set_icon_action(self.arm_button, "armed" if project_armed else "arm",
+                             "ARM 해제" if project_armed else "ARM 설정")
+        self.output.setEnabled(not self.running)
+        self.hid_port.setEnabled(not self.running)
+        self.hid_mode.setEnabled(not self.running and bool(self.checked_port))
+        self.hid_refresh.setEnabled(not self.running)
+        self.output_form.setRowVisible(self.port_row, self.uses_hid())
+        self.output_form.setRowVisible(self.hid_mode, self.uses_hid())
+        self.output_form.setRowVisible(self.hid_status, self.uses_hid())
+        if self.running and self.running_hid_port:
+            connection = {
+                "RUNNING": ("연결 · 실행 중", "ready"),
+                "PAUSED": ("연결 · 일시정지", "ready"),
+                "ERROR": ("실행 오류", "error"),
+                "STOPPED": ("실행 종료", ""),
+            }
+            label, style = connection.get(self.session_state, ("Runner 연결 대기", ""))
+            self.set_hid_status(f"{self.running_hid_port} · {label}", style)
         self.targets.setEnabled(bool(self.store) and not self.running)
         self.target_button.setEnabled(bool(self.store) and not self.running)
         sim = self.running and not armed and self.session_state == "RUNNING"
         self.simulate.setEnabled(sim)
         self.hotkey.setEnabled(sim)
+
+    def uses_hid(self):
+        return self.output.currentData() == OutputKind.EXTERNAL_HID
+
+    def real_output(self):
+        return self.output.currentData() != OutputKind.FAKE and self.armed()
+
+    def output_changed(self):
+        self.project.setdefault("output_profile", {})["output_kind"] = self.output.currentData()
+        self.modified()
+        self.update_output_panel()
+
+    def hid_selection_changed(self):
+        profile = self.project.setdefault("output_profile", {"output_kind": self.output.currentData()})
+        previously = profile.pop("device_selector", None)
+        selector = self.hid_devices.get(self.hid_port.currentData())
+        if selector is not None:
+            profile["device_selector"] = selector
+        if selector != previously:
+            self.modified()
+        self.check_hid_port()
+
+    def hid_mode_changed(self):
+        profile = self.project.setdefault("output_profile", {"output_kind": self.output.currentData()})
+        if self.hid_mode.currentData() == HidMode.ONBOARD:
+            profile["hid_mode"] = HidMode.ONBOARD
+        else:
+            profile.pop("hid_mode", None)
+        self.modified()
+
+    def restore_output_profile(self):
+        profile = project_output(self.project)
+        with QSignalBlocker(self.output), QSignalBlocker(self.hid_port), QSignalBlocker(self.hid_mode):
+            self.output.setCurrentIndex(self.output.findData(profile["output_kind"]))
+            self.hid_port.clear()
+            self.hid_mode.setCurrentIndex(self.hid_mode.findData(profile.get("hid_mode", HidMode.STREAMING)))
+        self.probe_serial += 1
+        self.checked_port = None
+        self.update_output_panel()
+
+    def update_output_panel(self):
+        self.refresh()
+        if self.uses_hid():
+            self.load_hid_ports(recheck=True)
+            self.hid_timer.start()
+        else:
+            self.hid_timer.stop()
+
+    def load_hid_ports(self, *, recheck=False):
+        if self.running or not self.uses_hid():
+            return
+        selected = self.hid_port.currentData()
+        was_available = selected in self.hid_ports
+        previous_issue = self.hid_issue
+        labels = {}
+        try:
+            ports = list_ports()
+            devices = {item["port"]: usb_selector(item) for item in ports}
+            for item in ports:
+                name = item["port"]
+                description = (item.get("description") or "").strip().removesuffix(f"({name})").rstrip()
+                labels[name] = f"{name} · {description}" if description and description not in {"n/a", name} else name
+            self.hid_issue = ""
+        except (OSError, RuntimeError) as error:
+            devices = {}
+            self.hid_issue = str(error)
+        saved = project_output(self.project).get("device_selector")
+        matches = [port for port, selector in devices.items() if saved and selector == saved]
+        new_select = (matches[0] if len(matches) == 1 else None) if saved else selected
+        changed = selected != new_select or devices.get(selected) != self.hid_devices.get(selected)
+        self.hid_devices = devices
+        if not self.hid_port.count() or labels != self.hid_ports or changed:
+            self.hid_ports = labels
+            with QSignalBlocker(self.hid_port):
+                self.hid_port.clear()
+                self.hid_port.addItem("포트 선택", None)
+                for name, label in labels.items():
+                    self.hid_port.addItem(label, name)
+                if new_select and new_select not in labels:
+                    self.hid_port.addItem(f"{new_select} (미연결)", new_select)
+                self.hid_port.setCurrentIndex(max(0, self.hid_port.findData(new_select)))
+            recheck |= changed or was_available != (new_select in labels) or not new_select
+        if recheck or self.hid_issue != previous_issue:
+            self.check_hid_port()
+
+    def set_hid_status(self, text, state="", detail=""):
+        self.hid_status.setText(text)
+        self.hid_status.setToolTip(detail)
+        self.hid_status.setAccessibleDescription(detail)
+        self.set_style_state(self.hid_status, "connection", state)
+
+    def check_hid_port(self):
+        self.probe_serial += 1
+        self.checked_port = None
+        self.hid_mode.setEnabled(False)
+        self.begin_hid_probe()
+
+    def begin_hid_probe(self):
+        if self.running or not self.uses_hid():
+            return
+        port = self.hid_port.currentData()
+        if self.hid_issue:
+            self.set_hid_status("COM 포트 조회 실패", "error", self.hid_issue)
+        elif not port and project_output(self.project).get("device_selector"):
+            self.set_hid_status("저장된 HID 장치를 찾을 수 없습니다.", "error")
+        elif not port:
+            self.set_hid_status("장치를 연결하고 포트를 선택하세요." if self.hid_ports else "감지된 COM 포트 없음")
+        elif port not in self.hid_ports:
+            self.set_hid_status(f"{port} 연결 끊김", "error")
+        else:
+            self.set_hid_status(f"{port} 확인 중…")
+            if not self.probing:
+                self.probing = True
+                Thread(target=self.probe_hid_port, args=(self.probe_serial, port), daemon=True).start()
+
+    def probe_hid_port(self, serial, port):
+        try:
+            device, detail = probe_port(port), ""
+        except (OSError, ValueError, RuntimeError) as error:
+            device, detail = None, str(error)
+        try:
+            self.hid_probe_result.emit(serial, port, device, detail)
+        except RuntimeError:
+            # Qt may have already destroyed the window on exit.
+            pass
+
+    @Slot(int, str, object, str)
+    def finish_hid_probe(self, serial, port, device, detail):
+        self.probing = False
+        if serial != self.probe_serial:
+            self.begin_hid_probe()
+        elif self.uses_hid() and not self.running:
+            if device is None:
+                self.set_hid_status(f"{port} 연결 확인 실패", "error", detail)
+                self.log(f"{port} · {detail}")
+            else:
+                self.checked_port = port
+                self.hid_mode.model().item(1).setEnabled(device.get("max_onboard_jobs", 0) > 0)
+                self.hid_mode.setEnabled(True)
+                self.set_hid_status(f"{port} 연결 확인", "ready",
+                                    f"{device['board']} · 펌웨어 {device['firmware']} · HID {device['protocol']}")
 
     def log(self, text):
         self.logs.appendPlainText(text)
@@ -459,6 +705,7 @@ class Studio(QMainWindow):
     def create(self):
         if not self.running and self.confirm_changes():
             self.project, self.path, self.dirty = new_project(), None, False
+            self.restore_output_profile()
             self.load_workspace()
 
     def open(self):
@@ -475,7 +722,9 @@ class Studio(QMainWindow):
                     or not isinstance(project.get("name"), str)):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
             validate_assets(project.get("image_assets", {}))
+            project_output(project)
             self.project, self.path, self.dirty = project, Path(path), False
+            self.restore_output_profile()
             self.load_workspace()
         except (ValueError, OSError) as error:
             QMessageBox.warning(self, "열기 실패", str(error))
@@ -544,13 +793,18 @@ class Studio(QMainWindow):
     def toggle_arm(self):
         if not self.store:
             return
+        if self.output.currentData() == OutputKind.FAKE and not self.armed():
+            return
         if not self.path and not self.save():
             return
         armed = self.armed()
         if not armed:
             if self.verify() is None:
                 return
-            if QMessageBox.question(self, "실입력 허용", "이 프로젝트를 시작하면 선택한 창에 실제 키 입력을 보낼 수 있습니다. ARM을 설정할까요?") != QMessageBox.StandardButton.Yes:
+            if QMessageBox.question(
+                self, "실입력 허용",
+                f"{self.output.currentText()}에서 선택한 창에 실제 키보드·마우스 입력을 보낼 수 있습니다. ARM을 설정할까요?",
+            ) != QMessageBox.StandardButton.Yes:
                 return
         try:
             self.store.set(self.path, self.project, not armed)
@@ -562,7 +816,7 @@ class Studio(QMainWindow):
         program = self.verify()
         if program is None or self.running:
             return
-        armed = self.armed()
+        armed = self.real_output()
         if debug and armed:
             return
         selected = self.targets.currentData()
@@ -571,6 +825,14 @@ class Studio(QMainWindow):
             self.log("실입력에 사용할 대상 창을 선택하세요.")
             self.targets.setFocus()
             return
+        hid_port = None
+        if armed and self.uses_hid():
+            self.load_hid_ports()
+            hid_port = self.hid_port.currentData()
+            if not hid_port or hid_port != self.checked_port:
+                self.log("External HID 장치를 연결하고 COM 포트의 연결 확인을 완료하세요.")
+                self.hid_port.setFocus()
+                return
         ids = [spec["image"] for spec in sensor_specs(program)
                if spec["op"] == "region_image" and spec["image"].startswith("asset:")]
         images = {}
@@ -582,9 +844,13 @@ class Studio(QMainWindow):
                 self.clear_runner_assets()
                 self.log(f"이미지 에셋 준비 실패 · {error}")
                 return
-        data = json.dumps({"program": program, "target": target, "query_target": selected, "debug": debug,
-                           "image_assets": images,
-                           "project_directory": str(self.path.resolve().parent if self.path else Path.cwd())}).encode("ascii")
+        config = {"program": program, "target": target, "query_target": selected, "debug": debug,
+                  "image_assets": images, "project_directory": str(self.path.resolve().parent if self.path else Path.cwd())}
+        if hid_port:
+            config["hid_port"] = hid_port
+            if self.hid_mode.currentData() == HidMode.ONBOARD:
+                config["hid_onboard"] = True
+        data = json.dumps(config).encode("ascii")
         if len(data) >= 4 * 1024 * 1024 - 1:
             self.clear_runner_assets()
             self.log("실행 프로그램이 4 MiB 한도를 초과했습니다.")
@@ -593,6 +859,7 @@ class Studio(QMainWindow):
         self.stats.setText("누름 0 · 해제 0\n누락 주기 0 · 오류 0")
         self.machine_label.hide()
         self.session_mode = "live" if armed else "dry"
+        self.running_hid_port = hid_port
         self.session_state = "WAITING"
         self.running = True
         self.refresh()
@@ -603,6 +870,8 @@ class Studio(QMainWindow):
             self.clear_runner_assets()
             self.running = False
             self.session_state = "ERROR"
+            if hid_port:
+                self.check_hid_port()
             self.refresh()
             return
         self.process.write(data + b"\n")
@@ -678,12 +947,14 @@ class Studio(QMainWindow):
         self.clear_runner_assets()
         self.heartbeat.stop()
         self.running = False
+        self.running_hid_port = None
         if code or exit_status == QProcess.ExitStatus.CrashExit or self.session_state not in ("STOPPED", "ERROR"):
             if self.session_state == "BREAKPOINT":
                 self.bridge.focusBlock.emit("")
             self.session_state = "ERROR"
             self.log("Runner 연결이 끊겼습니다.")
         self.refresh()
+        self.load_hid_ports(recheck=True)
         if self.closing:
             self.close()
 

@@ -18,6 +18,10 @@ _RESPONSES = {
     Opcode.INPUT_EVENT: Opcode.ACK,
     Opcode.RELEASE_ALL: Opcode.ACK,
     Opcode.GET_STATUS: Opcode.STATUS,
+    Opcode.PREPARE_JOB: Opcode.ACK,
+    Opcode.QUEUE_BATCH: Opcode.ACK,
+    Opcode.START_JOB: Opcode.ACK,
+    Opcode.CANCEL_JOB: Opcode.ACK,
 }
 _END_SESSION = (Opcode.RELEASE_ALL, Opcode.DISARM_SESSION)
 
@@ -27,6 +31,7 @@ class _Pending:
     opcode: Opcode
     seq: int
     deadline_ms: int
+    acknowledgement: bytes
 
 
 class RequestTracker:
@@ -43,19 +48,21 @@ class RequestTracker:
         self._pending: _Pending | None = None
         self._parser = FrameParser()
         self._closed = False
+        self._job_done: Frame | None = None
 
     def request(self, opcode: Opcode, payload: bytes, now_ms: int) -> bytes:
         self.check_timeout(now_ms)
         if self._pending is not None:
             raise TransportError("a HID request is already in flight")
         if opcode not in _RESPONSES:
-            raise ValueError("unsupported streaming request")
+            raise ValueError("unsupported HID request")
         if self._next_seq == 0xFFFF and opcode not in _END_SESSION:
             raise TransportError("HID sequence exhausted, release inputs and open a new session")
         frame = Frame(opcode, payload, seq=self._next_seq, session_id=self._session_id)
         packet = encode(frame)
         self._next_seq += 1
-        self._pending = _Pending(frame.opcode, frame.seq, now_ms + self._timeout_ms)
+        suffix = payload[:2] if opcode in (Opcode.PREPARE_JOB, Opcode.QUEUE_BATCH) else b""
+        self._pending = _Pending(frame.opcode, frame.seq, now_ms + self._timeout_ms, bytes((opcode,)) + suffix)
         return packet
 
     def receive(self, chunk: bytes, now_ms: int) -> Frame | None:
@@ -68,6 +75,11 @@ class RequestTracker:
                 continue
             if frame.opcode is Opcode.FAULT:
                 self._fail("HID device reported a fault")
+            if frame.opcode is Opcode.JOB_DONE:
+                if frame.seq or len(frame.payload) != 9:
+                    self._fail("invalid HID job completion")
+                self._job_done = frame
+                continue
             pending = self._pending
             if pending is None or frame.seq != pending.seq:
                 continue
@@ -78,13 +90,17 @@ class RequestTracker:
                 self._fail(f"HID device rejected {pending.opcode.name} ({error_code})")
             if frame.opcode is not _RESPONSES[pending.opcode]:
                 self._fail("unexpected HID response opcode")
-            if frame.opcode is Opcode.ACK and frame.payload != bytes((pending.opcode,)):
+            if frame.opcode is Opcode.ACK and frame.payload != pending.acknowledgement:
                 self._fail("invalid HID acknowledgement")
             self._pending = None
             response = frame
             if pending.opcode in _END_SESSION:
                 self.close()
         return response
+
+    def take_job_done(self) -> Frame | None:
+        frame, self._job_done = self._job_done, None
+        return frame
 
     def check_timeout(self, now_ms: int) -> None:
         if self._closed:
