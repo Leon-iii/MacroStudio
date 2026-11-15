@@ -1,3 +1,4 @@
+from queue import Queue
 from threading import Event
 from time import perf_counter_ns
 
@@ -7,7 +8,7 @@ from macro_studio.backend import FakeInputBackend, VirtualClock
 from macro_studio.compiler import compile_project
 from macro_studio.ir import ValidationError, evaluate, validate_program
 from macro_studio.runtime import Runtime
-from macro_studio.sensors import ScreenSensors, sample, sensor_specs, worker
+from macro_studio.sensors import ScreenSensors, prepare_image_template, sample, sensor_specs, worker
 
 PIXEL = {"op": "pixel_color", "block_id": "pixel", "x": -2, "y": 3, "color": "#ff1133"}
 
@@ -81,6 +82,59 @@ def test_image_similarity_keeps_exact_default_and_accepts_small_rgb_changes(thre
     if threshold is not None:
         spec["min_similarity"] = threshold
     assert sample(spec, lambda **_: frame, template) is expected
+
+
+@pytest.mark.parametrize(("gray", "threshold", "expected"), [
+    (127, 1.0, True), (126, 1.0, False), (64, 192 / 255, True),
+    (64, 0.753, False), (0, 128 / 255, True), (0, 0.51, False),
+])
+def test_translucent_white_scores_by_distance_from_compositing_range(gray, threshold, expected):
+    Image = pytest.importorskip("PIL.Image")
+    template = prepare_image_template(Image.new("RGBA", (1, 1), (255, 255, 255, 127)))
+    frame = Image.new("RGB", (1, 1), (gray,) * 3)
+    spec = dict(PIXEL, op="region_image", min_similarity=threshold)
+    assert sample(spec, lambda **_: frame, template) is expected
+
+
+def test_alpha_image_worker_loads_palette_png_and_matches_at_an_offset(tmp_path, monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    from PIL import ImageGrab
+
+    template = Image.new("P", (3, 1))
+    template.putpalette([255, 0, 255, 60, 120, 180, 0, 0, 0])
+    template.putdata([0, 1, 2])
+    template.save(tmp_path / "alpha.png", transparency=bytes([0, 255, 127]))
+    frame = Image.new("RGB", (6, 2), (255, 255, 255))
+    frame.putpixel((4, 1), (60, 120, 180))
+    frame.putpixel((5, 1), (128, 64, 0))
+    stopped = Event()
+
+    def grab(**_):
+        stopped.set()
+        return frame
+
+    monkeypatch.setattr(ImageGrab, "grab", grab)
+    spec = dict(PIXEL, op="region_image", width=6, height=2, image="alpha.png")
+    output = Queue()
+    worker([spec], tmp_path, Queue(), output, stopped)
+    kind, block_id, (_, result) = output.get_nowait()
+    assert (kind, block_id, result) == ("value", spec["block_id"], True)
+
+    frame.putpixel((4, 1), (61, 120, 180))
+    stopped.clear()
+    worker([spec], tmp_path, Queue(), output, stopped)
+    assert output.get_nowait()[2][1] is False
+
+
+def test_transparent_pixels_do_not_dilute_similarity_error():
+    Image = pytest.importorskip("PIL.Image")
+    template = Image.new("RGBA", (8, 1), (255, 255, 255, 0))
+    with pytest.raises(ValueError, match="완전 투명"):
+        prepare_image_template(template)
+    template.putpixel((0, 0), (255, 255, 255, 127))
+    frame = Image.new("RGB", template.size)
+    spec = dict(PIXEL, op="region_image", width=8, min_similarity=0.51)
+    assert not sample(spec, lambda **_: frame, prepare_image_template(template))
 
 
 def test_image_similarity_search_matches_direct_pixel_scores():

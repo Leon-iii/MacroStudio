@@ -171,6 +171,64 @@ def contains_similar_image(frame, template, threshold):
     return False
 
 
+class AlphaImageTemplate:
+    def __init__(self, rgba):
+        from PIL import Image
+
+        self.size = rgba.size
+        alpha = rgba.getchannel("A")
+        self.max_error = (rgba.width * rgba.height - alpha.histogram()[0]) * 3 * 255
+        if not self.max_error:
+            raise ValueError("비교할 픽셀이 없는 완전 투명 이미지입니다.")
+        # Composite over black and white to get the inclusive 8-bit RGB bounds.
+        self.lower, self.upper = (
+            Image.alpha_composite(Image.new("RGBA", rgba.size, color), rgba).convert("RGB")
+            for color in ("black", "white")
+        )
+        anchor = alpha.tobytes().find(bytes([alpha.getextrema()[1]]))
+        self.anchor = (anchor % rgba.width, anchor // rgba.width)
+
+    def matches(self, frame, threshold):
+        from PIL import ImageChops, ImageStat
+
+        tw, th = self.size
+        if tw > frame.width or th > frame.height:
+            return False
+        if threshold == 0:
+            return True
+
+        ax, ay = self.anchor
+        lower = self.lower.getpixel(self.anchor)
+        upper = self.upper.getpixel(self.anchor)
+        pixels = frame.load()
+        for y in range(frame.height - th + 1):
+            for x in range(frame.width - tw + 1):
+                anchor_error = sum(max(lo - value, value - hi, 0)
+                                   for value, lo, hi in zip(pixels[x + ax, y + ay], lower, upper))
+                if (self.max_error - anchor_error) / self.max_error < threshold:
+                    continue
+                patch = frame.crop((x, y, x + tw, y + th))
+                difference = ImageChops.add(ImageChops.subtract(self.lower, patch),
+                                            ImageChops.subtract(patch, self.upper))
+                if threshold == 1.0:
+                    if not difference.getbbox():
+                        return True
+                else:
+                    error = sum(ImageStat.Stat(difference).sum)
+                    if (self.max_error - error) / self.max_error >= threshold:
+                        return True
+        return False
+
+
+def prepare_image_template(image):
+    if "A" in image.getbands() or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        if rgba.getchannel("A").getextrema()[0] < 255:
+            return AlphaImageTemplate(rgba)
+        return rgba.convert("RGB")
+    return image.convert("RGB")
+
+
 def read_text(frame, language):
     executable = next((directory / "tesseract.exe"
                        for directory in map(Path, environ.get("PATH", "").split(pathsep))
@@ -203,6 +261,8 @@ def sample(spec, grab, template=None):
     if spec["op"] == "region_text":
         return normalize_text(spec["text"]) in normalize_text(read_text(frame, spec["language"]))
     threshold = spec.get("min_similarity", 1.0)
+    if isinstance(template, AlphaImageTemplate):
+        return template.matches(frame, threshold)
     if threshold == 1.0:
         return contains_image(frame, template)
     return contains_similar_image(frame, template, threshold)
@@ -222,7 +282,7 @@ def worker(specs, base, requests, output, stopped):
                 if (image.width > (spec["width"] if type(spec["width"]) is int else 1024) or
                         image.height > (spec["height"] if type(spec["height"]) is int else 1024)):
                     raise ValueError("template is larger than the search region")
-                templates[key] = image.convert("RGB")
+                templates[key] = prepare_image_template(image)
         except (OSError, ValueError, Image.DecompressionBombError) as error:
             disabled.add(key)
             try:
