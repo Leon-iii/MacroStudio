@@ -135,6 +135,15 @@ const workspace = Blockly.inject("workspace", {
 
 new QWebChannel(qt.webChannelTransport, channel => {
   const bridge = channel.objects.bridge;
+  let workspacePublishQueued = false;
+  function scheduleWorkspacePublish() {
+    if (workspacePublishQueued) return;
+    workspacePublishQueued = true;
+    queueMicrotask(() => {
+      workspacePublishQueued = false;
+      bridge.changed(JSON.stringify(Blockly.serialization.workspaces.save(workspace)));
+    });
+  }
   Blockly.ContextMenuRegistry.registry.register({
     id: "macro-studio-block-help",
     scopeType: Blockly.ContextMenuRegistry.ScopeType.BLOCK,
@@ -155,7 +164,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
     callback: ({block}) => {
       block.data = block.data === breakpoint ? null : breakpoint;
       styleBreakpoint(block);
-      bridge.changed(JSON.stringify(Blockly.serialization.workspaces.save(workspace)));
+      scheduleWorkspacePublish();
     },
   });
   let viewing = false;
@@ -197,7 +206,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
       if (event.type === Blockly.Events.BLOCK_CREATE) {
         event.ids?.map(id => workspace.getBlockById(id)).filter(Boolean).forEach(styleBreakpoint);
       }
-      bridge.changed(JSON.stringify(Blockly.serialization.workspaces.save(workspace)));
+      scheduleWorkspacePublish();
     }
   });
   bridge.ready();
