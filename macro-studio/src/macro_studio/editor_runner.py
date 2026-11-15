@@ -11,6 +11,9 @@ from .runtime import Runtime
 from .sensors import ScreenSensors, sensor_specs
 
 
+HEARTBEAT_TIMEOUT_NS = 1_000_000_000
+
+
 def emit(kind, **data):
     print(json.dumps({"kind": kind, **data}, ensure_ascii=True), flush=True)
 
@@ -35,6 +38,10 @@ class DryBackend(FakeInputBackend):
 
     def send_mouse_up(self, button):
         self.record("해제", f"마우스 {button}")
+
+    def send_mouse_move(self, position):
+        self.cursor = position
+        self.record("이동", f"마우스 X {position[0]} Y {position[1]}")
 
     def flush(self):
         if self.events or self.omitted:
@@ -102,10 +109,13 @@ def main():
         engine.on_transition = lambda name: emit("transition", name=name)
         if sensors is not None:
             engine.read_sensor = sensors.read
+            engine.read_sensor_at = sensors.read_at
 
         def observe(scheduled, actual, action, inserted):
-            if inserted:
-                counts["pressed" if action.endswith("_down") else "released"] += 1
+            if inserted and action.endswith("_down"):
+                counts["pressed"] += 1
+            elif inserted and action.endswith("_up"):
+                counts["released"] += 1
 
         engine.observe_input = observe
 
@@ -126,12 +136,25 @@ def main():
 
     def read_commands():
         nonlocal last_seen, closed
+        pending = b""
         try:
-            for line in source:
-                if line == b"heartbeat\n":
-                    last_seen = perf_counter_ns()
-                else:
-                    commands.put_nowait(line.strip().decode("ascii"))
+            while True:
+                incoming = source.read(4096)
+                if not incoming:
+                    # Qt's Windows pipe can briefly return an empty read when the sensor child starts.
+                    if perf_counter_ns() - last_seen >= HEARTBEAT_TIMEOUT_NS:
+                        return
+                    sleep(0.02)
+                    continue
+                *lines, pending = (pending + incoming).split(b"\n")
+                for line in lines:
+                    line = line.strip()
+                    if line == b"heartbeat":
+                        last_seen = perf_counter_ns()
+                    elif line:
+                        commands.put_nowait(line.decode("ascii"))
+                if len(pending) > 4096:
+                    return
         finally:
             closed = True
 
@@ -141,7 +164,7 @@ def main():
         if now >= next_update:
             publish()
             next_update = now + 250_000_000
-        if closed or now - last_seen > 1_000_000_000:
+        if closed or now - last_seen > HEARTBEAT_TIMEOUT_NS:
             emit("log", message="편집기 연결이 끊겨 실행을 정지합니다.")
             return "stop"
         try:
@@ -155,13 +178,19 @@ def main():
     try:
         config = json.loads(setup)
         program = config["program"]
-        Thread(target=read_commands, daemon=True).start()
         specs = sensor_specs(program)
         if specs:
+            images = config.get("image_assets", {})
+            specs = [dict(spec, image=images[spec["image"]])
+                     if spec["op"] == "region_image" and spec["image"].startswith("asset:") else spec
+                     for spec in specs]
             sensors = ScreenSensors(
                 specs, config.get("project_directory", "."), report_sensor,
             )
             sensors.__enter__()
+        # Launch the sensor process before reading from Qt's stdin pipe on Windows.
+        last_seen = perf_counter_ns()
+        Thread(target=read_commands, daemon=True).start()
         duration = 86_400_000_000_000
         if config["target"]:
             from .win32 import WindowsDesktop

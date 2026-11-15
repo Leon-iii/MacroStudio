@@ -173,8 +173,17 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             if mouse and not desktop.cursor_over(target):
                 raise TaskFault("pointer_outside_target", "mouse pointer must be over the target window")
 
+        def before_move(position: tuple[int, int]) -> None:
+            nonlocal pause_pending
+            if not desktop.focused(target):
+                pause_pending = True
+                raise TaskFault("focus_lost", "target is no longer in the foreground")
+            if not desktop.point_over(target, position):
+                raise TaskFault("pointer_outside_target", "destination must be over the target window")
+
         runtime = Runtime(live_program, clock, desktop)
         runtime.before_press = before_press
+        runtime.before_move = before_move
         runtime.read_window = lambda state: desktop.window_state(target, state)
         if metrics:
             def record(scheduled_ns, actual_ns, action, inserted):

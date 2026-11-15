@@ -5,16 +5,52 @@ import pytest
 
 from macro_studio.backend import FakeInputBackend, VirtualClock
 from macro_studio.compiler import compile_project
-from macro_studio.ir import evaluate, validate_program
+from macro_studio.ir import ValidationError, evaluate, validate_program
 from macro_studio.runtime import Runtime
-from macro_studio.sensors import ScreenSensors, sample, sensor_specs
+from macro_studio.sensors import ScreenSensors, sample, sensor_specs, worker
 
 PIXEL = {"op": "pixel_color", "block_id": "pixel", "x": -2, "y": 3, "color": "#ff1133"}
 
 
-def stalled_sampler(specs, base, output, stopped):
+def stalled_sampler(specs, base, requests, output, stopped):
     output.put(("error", "", "sampling started"))
     stopped.wait(10)
+
+
+def geometry_sampler(specs, base, requests, output, stopped):
+    from PIL import Image, ImageGrab
+    from macro_studio import sensors
+
+    def grab(bbox, all_screens):
+        assert all_screens
+        left, top, right, bottom = bbox
+        colour = (255, 0, 0) if bbox == (5, -3, 21, 5) else (0, 0, 0)
+        return Image.new("RGB", (right - left, bottom - top), colour)
+
+    ImageGrab.grab = grab
+    sensors.read_text = lambda frame, language: "READY" if frame.getpixel((0, 0)) == (255, 0, 0) else ""
+    worker(specs, base, requests, output, stopped)
+
+
+def test_dynamic_region_evaluates_coordinates_and_uses_only_matching_samples(tmp_path):
+    pytest.importorskip("PIL.Image")
+    spec = {"op": "region_text", "block_id": "ocr", "x": {"var": "left"}, "y": -3,
+            "width": {"op": "mul", "args": [{"var": "scale"}, 8]}, "height": 8,
+            "text": "READY", "language": "eng"}
+    errors = []
+    with ScreenSensors([spec], tmp_path, lambda *args: errors.append(args), sampler=geometry_sampler) as sensors:
+        variables = {"left": 5, "scale": 2}
+        assert not evaluate(spec, variables, sensors_at=sensors.read_at)
+        done = Event()
+        deadline = perf_counter_ns() + 5_000_000_000
+        while not evaluate(spec, variables, sensors_at=sensors.read_at):
+            assert perf_counter_ns() < deadline, errors
+            done.wait(0.02)
+        assert not evaluate(spec, {**variables, "left": 6}, sensors_at=sensors.read_at)
+        assert not evaluate(spec, {**variables, "scale": 1}, sensors_at=sensors.read_at)
+        assert not evaluate(spec, {**variables, "scale": 0}, sensors_at=sensors.read_at)
+        assert evaluate(spec, variables, sensors_at=sensors.read_at)
+    assert not errors
 
 
 def test_screen_colors_and_image_positions():
@@ -44,6 +80,18 @@ def test_blockly_pixel_guard_compiles_to_sensor_reference():
     program, _ = compile_project({"project_id": "sensors", "workspace": workspace})
     assert sensor_specs(program) == [PIXEL]
     assert evaluate(program["handlers"][0]["guard"], {}, {"pixel": True}.get)
+
+
+def test_image_sensor_requires_referenced_project_asset():
+    asset_id = "asset:reference"
+    region = {"type": "ms_region_image", "id": "image-check",
+              "fields": {"X": 0, "Y": 0, "WIDTH": 20, "HEIGHT": 10, "IMAGE": asset_id}}
+    start = {"type": "ms_start", "id": "start", "inputs": {"GUARD": {"block": region}}}
+    project = {"project_id": "images", "workspace": {"blocks": {"blocks": [start]}}}
+    with pytest.raises(ValidationError, match=r"\(image-check\)"):
+        compile_project(project)
+    program, _ = compile_project({**project, "image_assets": {asset_id: {"name": "버튼"}}})
+    assert sensor_specs(program)[0]["image"] == asset_id
 
 
 def test_stalled_sampler_cannot_stall_live_deadlines(tmp_path):

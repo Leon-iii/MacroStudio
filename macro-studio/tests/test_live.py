@@ -51,6 +51,31 @@ class PollClock(VirtualClock):
         super().advance_to(min(self.now_ns + 1_000_000, deadline_ns))
 
 
+def test_coordinate_click_does_not_move_to_a_point_outside_target():
+    class CoordinateDesktop(Desktop):
+        def point_over(self, target, position):
+            assert position == (20, 30)
+            return False
+
+        def send_mouse_move(self, position):
+            self.events.append(("move", position))
+
+    clock = PollClock()
+    desktop = CoordinateDesktop(clock)
+    program = validate_program({
+        "ir_version": 1, "project_id": "coordinates",
+        "workflows": {"click": {"steps": [{"op": "mouse_click_at", "block_id": "click",
+                                          "position": {"x": 20, "y": 30}, "button": "left",
+                                          "hold_ns": 50_000_000}]}},
+        "handlers": [{"id": "start", "workflow_id": "click", "event": {"type": "project_start"}}],
+    })
+    result = run_live(program, desktop, 1, 10_000_000, clock=clock)
+    assert desktop.events == []
+    assert [(error["code"], error["block_id"]) for error in result["errors"]] == [
+        ("pointer_outside_target", "click"),
+    ]
+
+
 @pytest.mark.parametrize("frequency", [100, 200])
 def test_benchmark_counts_inserted_edges(frequency):
     clock = PollClock()

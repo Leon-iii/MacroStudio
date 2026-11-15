@@ -8,6 +8,8 @@ MAX_DURATION_NS = 86_400_000_000_000
 DURATION_UNIT_NS = {"ms": 1_000_000, "sec": 1_000_000_000, "min": 60_000_000_000}
 DEFAULT_STOP_HOTKEY = "CTRL+ALT+SHIFT+F11"
 SCREEN_SENSOR_OPS = ("pixel_color", "region_image", "region_text")
+SENSOR_COORDINATES = {"x": (-32768, 32767), "y": (-32768, 32767)}
+SENSOR_REGION = {**SENSOR_COORDINATES, "width": (1, 1024), "height": (1, 1024)}
 OCR_LANGUAGES = ("eng", "kor", "kor+eng")
 VALUE_TYPES = {"number": int, "boolean": bool, "string": str}
 PARAM_PREFIX = "@arg:"
@@ -65,6 +67,14 @@ def _scalar_type(value: object, path: str) -> type:
     raise ValidationError(f"{path}: expected a finite number, boolean or string")
 
 
+def sensor_geometry(spec):
+    return SENSOR_COORDINATES if spec["op"] == "pixel_color" else SENSOR_REGION
+
+
+def sensor_has_dynamic_geometry(spec):
+    return any(type(spec[name]) is not int for name in sensor_geometry(spec))
+
+
 def _expression(value: object, variables: dict, path: str, depth: int = 0) -> type:
     if depth > 32:
         raise ValidationError(f"{path}: expression nesting exceeds 32")
@@ -82,15 +92,17 @@ def _expression(value: object, variables: dict, path: str, depth: int = 0) -> ty
         return bool
     if op in SCREEN_SENSOR_OPS:
         label = f"{path} ({_name(value.get('block_id'), path)})"
-        _integer(value.get("x"), -32768, 32767, label)
-        _integer(value.get("y"), -32768, 32767, label)
+        for name, (lower, upper) in sensor_geometry(value).items():
+            operand = value.get(name)
+            if _expression(operand, variables, f"{label}.{name}", depth + 1) is not int:
+                raise ValidationError(f"{label}.{name}: expected a number")
+            if not isinstance(operand, dict):
+                _integer(round(operand), lower, upper, f"{label}.{name}")
         if op == "pixel_color":
             color = value.get("color")
             if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
                 raise ValidationError(f"{label}: expected #RRGGBB")
         else:
-            _integer(value.get("width"), 1, 1024, label)
-            _integer(value.get("height"), 1, 1024, label)
             if op == "region_image":
                 _name(value.get("image"), label)
             else:
@@ -117,7 +129,7 @@ def _expression(value: object, variables: dict, path: str, depth: int = 0) -> ty
     return result
 
 
-def evaluate(value, variables: dict, sensors=None, window=None):
+def evaluate(value, variables: dict, sensors=None, window=None, sensors_at=None):
     if not isinstance(value, dict):
         return value
     if "var" in value:
@@ -126,16 +138,26 @@ def evaluate(value, variables: dict, sensors=None, window=None):
     if op == "target_window":
         return window is not None and window(value["state"])
     if op in SCREEN_SENSOR_OPS:
-        return sensors is not None and sensors(value["block_id"])
+        if not sensor_has_dynamic_geometry(value):
+            return sensors is not None and sensors(value["block_id"])
+        if sensors_at is None:
+            return False
+        bounds = []
+        for name, (lower, upper) in sensor_geometry(value).items():
+            number = round(evaluate(value[name], variables, sensors, window, sensors_at))
+            if not lower <= number <= upper:
+                return False
+            bounds.append(number)
+        return sensors_at(value["block_id"], tuple(bounds))
     args = value["args"]
-    left = evaluate(args[0], variables, sensors, window)
+    left = evaluate(args[0], variables, sensors, window, sensors_at)
     if op == "not":
         return not left
     if op == "and":
-        return left and evaluate(args[1], variables, sensors, window)
+        return left and evaluate(args[1], variables, sensors, window, sensors_at)
     if op == "or":
-        return left or evaluate(args[1], variables, sensors, window)
-    result = _BINARY[op](left, evaluate(args[1], variables, sensors, window))
+        return left or evaluate(args[1], variables, sensors, window, sensors_at)
+    result = _BINARY[op](left, evaluate(args[1], variables, sensors, window, sensors_at))
     if type(result) is float and not math.isfinite(result):
         raise ValueError("expression result must be finite")
     return result
@@ -177,6 +199,46 @@ def _require_type(expression, variables, expected, path):
         raise ValidationError(f"{path}: incompatible expression type")
 
 
+def duration_nanoseconds(value, unit):
+    scale = DURATION_UNIT_NS[unit]
+    if not 0 <= value <= MAX_DURATION_NS // scale:
+        raise ValueError("duration must be between 0 and 24 hours")
+    return round(value * scale)
+
+
+def _duration(raw, variables, path):
+    duration = _object(raw, path)
+    unit = duration.get("unit")
+    if not isinstance(unit, str) or unit not in DURATION_UNIT_NS:
+        raise ValidationError(f"{path}: expected duration unit ms, sec or min")
+    value = duration.get("value")
+    _require_type(value, variables, int, path)
+    if isinstance(value, dict):
+        return None
+    try:
+        return duration_nanoseconds(value, unit)
+    except ValueError as error:
+        raise ValidationError(f"{path}: {error}") from error
+
+
+def _hold_duration(step, variables, path):
+    if "duration" not in step:
+        return _integer(step.get("hold_ns"), 1, MAX_DURATION_NS, path)
+    if "hold_ns" in step:
+        raise ValidationError(f"{path}: expected one hold duration")
+    hold = _duration(step["duration"], variables, path)
+    return None if hold is None else _integer(hold, 1, MAX_DURATION_NS, path)
+
+
+def _integer_expression(value, variables, lower, upper, path):
+    if isinstance(value, dict):
+        _require_type(value, variables, int, path)
+        return None
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    return _integer(value, lower, upper, path)
+
+
 def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loop=False):
     if depth > 32:
         raise ValidationError(f"{path}: block nesting exceeds 32")
@@ -188,28 +250,37 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             block_id = _name(step["block_id"], f"{location}.block_id")
             location = f"{location} ({block_id})"
         op = step.get("op")
+        if op in ("mouse_move", "mouse_click_at"):
+            position = _object(step.get("position"), location)
+            for axis in ("x", "y"):
+                coordinate = position.get(axis)
+                axis_path = f"{location}.{axis}"
+                if type(coordinate) is int:
+                    _integer(coordinate, -32768, 32767, axis_path)
+                else:
+                    _require_type(coordinate, variables, int, axis_path)
         if op == "wait":
             if "duration" in step:
-                duration = _object(step["duration"], location)
-                unit = duration.get("unit")
-                if "duration_ns" in step or not isinstance(unit, str) or unit not in DURATION_UNIT_NS:
-                    raise ValidationError(f"{location}: expected one duration with unit ms, sec or min")
-                _require_type(duration.get("value"), variables, int, location)
+                if "duration_ns" in step:
+                    raise ValidationError(f"{location}: expected one duration")
+                _duration(step["duration"], variables, location)
             else:
                 _integer(step.get("duration_ns"), 0, MAX_DURATION_NS, location)
+        elif op == "mouse_move":
+            _duration(step.get("duration"), variables, location)
         elif op == "emit_event":
             step["name"] = _event_name(step.get("name"), location)
-        elif op == "mouse_click":
+        elif op in ("mouse_click", "mouse_click_at"):
             if step.get("button") not in ("left", "right", "middle"):
                 raise ValidationError(f"{location}: invalid mouse button")
-            _integer(step.get("hold_ns"), 1, MAX_DURATION_NS, location)
+            _hold_duration(step, variables, location)
         elif op in ("key_tap", "tap_sequence"):
             step["key"] = _key(step.get("key"), location)
-            hold = _integer(step.get("hold_ns"), 1, MAX_DURATION_NS, location)
+            hold = _hold_duration(step, variables, location)
             if op == "tap_sequence":
-                hz = _integer(step.get("frequency_hz"), 1, 200, location)
-                _integer(step.get("count"), 1, MAX_REPEAT_COUNT, location)
-                if hold * hz >= 1_000_000_000:
+                hz = _integer_expression(step.get("frequency_hz"), variables, 1, 200, f"{location}.frequency_hz")
+                _integer_expression(step.get("count"), variables, 1, MAX_REPEAT_COUNT, f"{location}.count")
+                if hold is not None and hz is not None and hold * hz >= 1_000_000_000:
                     raise ValidationError(f"{location}: hold must be shorter than the period")
                 if step.get("missed_tick_policy", "skip_missed") != "skip_missed":
                     raise ValidationError(f"{location}: unsupported missed tick policy")

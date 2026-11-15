@@ -5,7 +5,7 @@ from heapq import heapify, heappop, heappush
 from itertools import count, takewhile
 
 from .backend import Clock, InputBackend
-from .ir import DURATION_UNIT_NS, MAX_CALL_DEPTH, MAX_DURATION_NS, MAX_REPEAT_COUNT, PARAM_PREFIX, evaluate
+from .ir import MAX_CALL_DEPTH, MAX_REPEAT_COUNT, PARAM_PREFIX, duration_nanoseconds, evaluate
 
 
 MAX_ACTIVE_TASKS = 256
@@ -15,6 +15,7 @@ INSTRUCTION_BUDGET = 256
 YIELD_NS = 1_000_000
 SECOND_NS = 1_000_000_000
 STATE_CHECK_NS = 200_000_000
+POINTER_STEP_NS = 16_000_000
 
 
 class TaskFault(ValueError):
@@ -64,6 +65,7 @@ class Runtime:
         self._active: dict[Task, None] = {}
         self._pending: dict[str, deque[Task]] = {}
         self._owners: dict[str, Task] = {}
+        self._pointer_owner: Task | None = None
         self._ready: list[tuple[int, int, Task]] = []
         self._custom_events: deque[tuple[int, str]] = deque()
         self._order = count()
@@ -71,8 +73,10 @@ class Runtime:
         self.termination = "completed"
         self.stop_latency_ns: int | None = None
         self.before_press: Callable[[str], None] | None = None
+        self.before_move: Callable[[tuple[int, int]], None] | None = None
         self.before_block: Callable[[dict], None] | None = None
         self.read_sensor: Callable[[str], bool] | None = None
+        self.read_sensor_at: Callable[[str, tuple[int, ...]], bool] | None = None
         self.read_window: Callable[[str], bool] | None = None
         self.on_transition: Callable[[str], None] | None = None
         self.machine_state: str | None = None
@@ -298,7 +302,7 @@ class Runtime:
 
     def _evaluate(self, expression, parameters=None):
         variables = ChainMap(parameters, self.globals) if parameters else self.globals
-        return evaluate(expression, variables, self.read_sensor, self.read_window)
+        return evaluate(expression, variables, self.read_sensor, self.read_window, self.read_sensor_at)
 
     def _schedule(self, task: Task, deadline: int) -> None:
         heappush(self._ready, (deadline, next(self._order), task))
@@ -320,6 +324,8 @@ class Runtime:
 
     def _drop(self, task: Task) -> None:
         del self._active[task]
+        if self._pointer_owner is task:
+            self._pointer_owner = None
         self._cleanup_key(task)
 
     def _finish(self, task: Task) -> None:
@@ -386,15 +392,7 @@ class Runtime:
             scope = scopes[-1]
             match step["op"]:
                 case "wait":
-                    duration_ns = step.get("duration_ns")
-                    if "duration" in step:
-                        duration = step["duration"]
-                        value = self._evaluate(duration["value"], scope)
-                        unit_ns = DURATION_UNIT_NS[duration["unit"]]
-                        if not 0 <= value <= MAX_DURATION_NS // unit_ns:
-                            raise TaskFault("wait_duration", "wait duration must be between 0 and 24 hours")
-                        duration_ns = round(value * unit_ns)
-                    yield self.clock.now_ns + duration_ns
+                    yield self.clock.now_ns + self._duration_ns(step, scope)
                 case "emit_event":
                     if len(self._custom_events) >= MAX_CUSTOM_EVENTS:
                         raise TaskFault("event_queue_limit", "custom event queue limit reached")
@@ -437,15 +435,75 @@ class Runtime:
                         frames.append(Frame.once(caller["then"] if value else caller["else"]))
                 case "end":
                     return
-                case "key_tap" | "mouse_click":
+                case "mouse_move":
+                    yield from self._move_pointer(task, step, scope, self._duration_ns(step, scope))
+                case "key_tap" | "mouse_click" | "mouse_click_at":
+                    hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
+                    if step["op"] == "mouse_click_at":
+                        yield from self._move_pointer(task, step, scope, 0)
                     pressed_at = self.clock.now_ns
                     key = step["key"] if step["op"] == "key_tap" else "mouse:" + step["button"]
                     self._press(task, key, pressed_at)
-                    release_at = self.clock.now_ns + step["hold_ns"]
+                    release_at = self.clock.now_ns + hold_ns
                     yield release_at
                     self._release(task, release_at)
                 case "tap_sequence":
-                    yield from self._tap_sequence(task, step)
+                    yield from self._tap_sequence(task, step, scope)
+
+    def _duration_ns(self, step: dict, scope: dict, *, legacy_key: str = "duration_ns") -> int:
+        if legacy_key in step:
+            return step[legacy_key]
+        duration = step["duration"]
+        value = self._evaluate(duration["value"], scope)
+        try:
+            nanoseconds = duration_nanoseconds(value, duration["unit"])
+        except ValueError as error:
+            raise TaskFault(f"{step['op']}_duration", str(error)) from error
+        if legacy_key == "hold_ns" and nanoseconds == 0:
+            raise TaskFault(f"{step['op']}_duration", "hold duration must be positive")
+        return nanoseconds
+
+    def _move_pointer(self, task: Task, step: dict, scope: dict, duration_ns: int) -> Iterator[int]:
+        if self._pointer_owner is not None or any(key.startswith("mouse:") for key in self._owners):
+            raise TaskFault("input_conflict", "mouse pointer or button is already in use")
+        x = round(self._evaluate(step["position"]["x"], scope))
+        y = round(self._evaluate(step["position"]["y"], scope))
+        if not (-32768 <= x <= 32767 and -32768 <= y <= 32767):
+            raise TaskFault("invalid_position", "mouse coordinates must be between -32768 and 32767")
+        destination = (x, y)
+        if self.before_move is not None:
+            self.before_move(destination)
+        if not duration_ns:
+            self._send(destination, "mouse_move", self.clock.now_ns, self.backend.send_mouse_move)
+            if step["op"] == "mouse_click_at" and self._pointer_position() != destination:
+                raise TaskFault("pointer_off_position", "mouse pointer did not reach the requested coordinates")
+            return
+
+        self._pointer_owner = task
+        origin = self._pointer_position()
+        start = self.clock.now_ns
+        end = start + duration_ns
+        deadline = min(end, start + POINTER_STEP_NS)
+        while True:
+            yield deadline
+            if self.before_move is not None:
+                self.before_move(destination)
+            elapsed = min(duration_ns, self.clock.now_ns - start)
+            if elapsed == duration_ns:
+                self._send(destination, "mouse_move", deadline, self.backend.send_mouse_move)
+                self._pointer_owner = None
+                return
+            fraction = elapsed / duration_ns
+            x = round(origin[0] + (destination[0] - origin[0]) * fraction)
+            y = round(origin[1] + (destination[1] - origin[1]) * fraction)
+            self._send((x, y), "mouse_move", deadline, self.backend.send_mouse_move)
+            deadline = min(end, start + (elapsed // POINTER_STEP_NS + 1) * POINTER_STEP_NS)
+
+    def _pointer_position(self) -> tuple[int, int]:
+        try:
+            return self.backend.mouse_position()
+        except OSError as error:
+            raise InputFault(f"mouse position read failed: {error}") from error
 
     def _loop_frame(self, step: dict, parameters: dict) -> Frame:
         if step["op"] == "forever":
@@ -460,11 +518,13 @@ class Runtime:
 
         return Frame(step["steps"], iterations, loop_block_id=step.get("block_id"), is_loop=True)
 
-    def _tap_sequence(self, task: Task, step: dict) -> Iterator[int]:
+    def _tap_sequence(self, task: Task, step: dict, scope: dict) -> Iterator[int]:
+        frequency = self._sequence_integer(step, scope, "frequency_hz", 200)
+        count = self._sequence_integer(step, scope, "count", MAX_REPEAT_COUNT)
+        hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
+        if hold_ns * frequency >= SECOND_NS:
+            raise TaskFault("tap_sequence_duration", "hold must be shorter than the period")
         origin = self.clock.now_ns
-        frequency = step["frequency_hz"]
-        hold_ns = step["hold_ns"]
-        count = step["count"]
         tick = 0
         while tick < count:
             press_at = origin + tick * SECOND_NS // frequency
@@ -483,8 +543,14 @@ class Runtime:
             self._release(task, release_at)
             tick += 1
 
+    def _sequence_integer(self, step: dict, scope: dict, name: str, upper: int) -> int:
+        value = self._evaluate(step[name], scope)
+        if not 1 <= value <= upper or value != int(value):
+            raise TaskFault(f"tap_sequence_{name}", f"{name} must be an integer from 1 to {upper}")
+        return int(value)
+
     def _press(self, task: Task, key: str, scheduled: int) -> None:
-        if key in self._owners:
+        if key in self._owners or (key.startswith("mouse:") and self._pointer_owner is not None):
             raise TaskFault("input_conflict", f"input is already held: {key}")
         if self.before_press is not None:
             self.before_press(key)
@@ -505,7 +571,7 @@ class Runtime:
         del self._owners[key]
         task.held_key = None
 
-    def _send(self, key: str, action: str, scheduled: int | None, send: Callable) -> None:
+    def _send(self, key: str | tuple[int, int], action: str, scheduled: int | None, send: Callable) -> None:
         actual = self.clock.now_ns
         inserted = False
         try:

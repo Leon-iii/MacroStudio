@@ -2,22 +2,25 @@ import json
 from pathlib import Path
 import re
 import sys
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from PySide6.QtCore import QByteArray, QIODevice, QObject, QProcess, QSize, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .block_help import BlockHelp
 from .compiler import compile_project
+from .image_assets import ImageAssetsDialog, asset_files, asset_references, validate_assets
 from .ir import normalize_hotkey
+from .key_capture import KeyCaptureDialog
 from .live import ArmStore
 from .sensors import sensor_specs
 
@@ -84,6 +87,7 @@ class Bridge(QObject):
     loaded = Signal()
     updated = Signal(str)
     helpRequested = Signal(str)
+    imageAssetsChanged = Signal(str)
 
     @Slot()
     def ready(self):
@@ -96,6 +100,22 @@ class Bridge(QObject):
     @Slot(str)
     def requestHelp(self, block_type):
         self.helpRequested.emit(block_type)
+
+    @Slot(str, result=str)
+    def chooseColour(self, initial):
+        colour = QColorDialog.getColor(QColor(initial), self.parent(), "색상 선택",
+                                       QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        return colour.name() if colour.isValid() else ""
+
+    @Slot(str, result=str)
+    def chooseKey(self, mode):
+        if self.parent().running:
+            return ""
+        dialog = KeyCaptureDialog(self.parent(), mode)
+        dialog.exec()
+        value = dialog.value
+        dialog.deleteLater()
+        return value
 
 
 class LocalRequests(QWebEngineUrlRequestInterceptor):
@@ -127,7 +147,7 @@ def new_project(example=False):
             }},
         ]
     return {"schema_version": 1, "project_id": uuid4().hex, "name": "예제 프로젝트" if example else "제목 없는 프로젝트",
-            "workspace": {"blocks": {"languageVersion": 0, "blocks": blocks}}, "globals": {}}
+            "workspace": {"blocks": {"languageVersion": 0, "blocks": blocks}}, "globals": {}, "image_assets": {}}
 
 
 class Studio(QMainWindow):
@@ -145,6 +165,7 @@ class Studio(QMainWindow):
         self.store = ArmStore.local() if sys.platform == "win32" else None
         self.bridge = Bridge(self)
         self.process = QProcess(self)
+        self.runner_assets = None
         self.process.readyReadStandardOutput.connect(self.read_runner)
         self.process.readyReadStandardError.connect(self.read_stderr)
         self.process.finished.connect(self.runner_finished)
@@ -169,6 +190,8 @@ class Studio(QMainWindow):
         ):
             action = menu.addAction(title, slot)
             action.setShortcut(shortcut)
+        images = self.menuBar().addMenu("이미지")
+        self.manage_images = images.addAction("이미지 에셋 관리…", self.open_image_assets)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -312,8 +335,27 @@ class Studio(QMainWindow):
 
     def load_workspace(self):
         self.globals.setText(json.dumps(self.project.get("globals", {}), ensure_ascii=False))
+        self.publish_image_assets()
         self.bridge.loadWorkspace.emit(json.dumps(self.project["workspace"], ensure_ascii=False))
         self.refresh()
+
+    def publish_image_assets(self):
+        assets = self.project.get("image_assets", {})
+        self.bridge.imageAssetsChanged.emit(json.dumps({key: asset["name"] for key, asset in assets.items()},
+                                                       ensure_ascii=False))
+
+    def open_image_assets(self):
+        if self.running:
+            return
+        dialog = ImageAssetsDialog(
+            self, self.project.setdefault("image_assets", {}),
+            lambda asset_id: asset_references(self.project["workspace"], asset_id), self.image_assets_changed,
+        )
+        dialog.exec()
+
+    def image_assets_changed(self):
+        self.publish_image_assets()
+        self.modified()
 
     def workspace_changed(self, value):
         self.project["workspace"] = json.loads(value)
@@ -344,6 +386,7 @@ class Studio(QMainWindow):
         self.set_icon_action(self.transport_button, "stop" if self.running else "play",
                              "정지" if self.running else "시작")
         self.verify_button.setEnabled(self.editor_ready)
+        self.manage_images.setEnabled(self.editor_ready and not self.running)
         at_breakpoint = self.running and self.session_state == "BREAKPOINT"
         self.debug_button.setEnabled(self.editor_ready and not self.running and not armed)
         self.step_button.setEnabled(at_breakpoint)
@@ -403,6 +446,7 @@ class Studio(QMainWindow):
                     or not isinstance(project.get("workspace"), dict)
                     or not isinstance(project.get("name"), str)):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
+            validate_assets(project.get("image_assets", {}))
             self.project, self.path, self.dirty = project, Path(path), False
             self.load_workspace()
         except (ValueError, OSError) as error:
@@ -499,9 +543,22 @@ class Studio(QMainWindow):
             self.log("실입력에 사용할 대상 창을 선택하세요.")
             self.targets.setFocus()
             return
+        ids = [spec["image"] for spec in sensor_specs(program)
+               if spec["op"] == "region_image" and spec["image"].startswith("asset:")]
+        images = {}
+        if ids:
+            try:
+                self.runner_assets = TemporaryDirectory(prefix="macro-studio-images-", ignore_cleanup_errors=True)
+                images = asset_files(self.project["image_assets"], ids, self.runner_assets.name)
+            except (OSError, ValueError) as error:
+                self.clear_runner_assets()
+                self.log(f"이미지 에셋 준비 실패 · {error}")
+                return
         data = json.dumps({"program": program, "target": target, "query_target": selected, "debug": debug,
+                           "image_assets": images,
                            "project_directory": str(self.path.resolve().parent if self.path else Path.cwd())}).encode("ascii")
         if len(data) >= 4 * 1024 * 1024 - 1:
+            self.clear_runner_assets()
             self.log("실행 프로그램이 4 MiB 한도를 초과했습니다.")
             return
         self.pending_output = b""
@@ -515,6 +572,7 @@ class Studio(QMainWindow):
                        else ["-u", "-m", "macro_studio.editor_runner"])
         self.process.start(sys.executable, runner_args)
         if not self.process.waitForStarted(1000):
+            self.clear_runner_assets()
             self.running = False
             self.session_state = "ERROR"
             self.refresh()
@@ -586,6 +644,7 @@ class Studio(QMainWindow):
 
     def runner_finished(self, code, exit_status):
         self.read_runner()
+        self.clear_runner_assets()
         self.heartbeat.stop()
         self.running = False
         if code or exit_status == QProcess.ExitStatus.CrashExit or self.session_state not in ("STOPPED", "ERROR"):
@@ -596,6 +655,11 @@ class Studio(QMainWindow):
         self.refresh()
         if self.closing:
             self.close()
+
+    def clear_runner_assets(self):
+        if self.runner_assets is not None:
+            self.runner_assets.cleanup()
+            self.runner_assets = None
 
     def closeEvent(self, event):
         if self.running:

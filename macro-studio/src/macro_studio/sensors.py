@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from io import BytesIO
 from multiprocessing import get_context
 from os import environ, pathsep
@@ -8,11 +9,12 @@ from threading import Event, Thread
 from time import perf_counter_ns
 from unicodedata import normalize
 
-from .ir import SCREEN_SENSOR_OPS
+from .ir import SCREEN_SENSOR_OPS, sensor_geometry, sensor_has_dynamic_geometry
 
-SAMPLE_SECONDS = 0.2
+SAMPLE_NS = 200_000_000
 STALE_NS = 1_000_000_000
 MAX_SENSORS = 16
+MAX_DYNAMIC_SAMPLES = MAX_SENSORS * 4
 
 
 def sensor_specs(program):
@@ -96,7 +98,7 @@ def sample(spec, grab, template=None):
     return contains_image(frame, template)
 
 
-def worker(specs, base, output, stopped):
+def worker(specs, base, requests, output, stopped):
     from PIL import Image, ImageGrab
 
     templates = {}
@@ -107,7 +109,8 @@ def worker(specs, base, output, stopped):
         key = spec["block_id"]
         try:
             with Image.open(Path(base) / spec["image"], formats=("PNG", "BMP", "JPEG")) as image:
-                if image.width > spec["width"] or image.height > spec["height"]:
+                if (image.width > (spec["width"] if type(spec["width"]) is int else 1024) or
+                        image.height > (spec["height"] if type(spec["height"]) is int else 1024)):
                     raise ValueError("template is larger than the search region")
                 templates[key] = image.convert("RGB")
         except (OSError, ValueError, Image.DecompressionBombError) as error:
@@ -116,10 +119,21 @@ def worker(specs, base, output, stopped):
                 output.put_nowait(("error", key, str(error)))
             except Full:
                 pass
+    static = [(spec["block_id"], spec) for spec in specs if not sensor_has_dynamic_geometry(spec)]
+    dynamic = {spec["block_id"]: spec for spec in specs if sensor_has_dynamic_geometry(spec)}
     reported = set()
     while not stopped.is_set():
         started = perf_counter_ns()
-        for spec in specs:
+        batch = dict(static)
+        for _ in range(MAX_DYNAMIC_SAMPLES):
+            try:
+                key, bounds = requests.get_nowait()
+            except Empty:
+                break
+            if key in dynamic:
+                spec = dynamic[key]
+                batch[key, bounds] = {**spec, **dict(zip(sensor_geometry(spec), bounds))}
+        for cache_key, spec in batch.items():
             if stopped.is_set():
                 return
             key = spec["block_id"]
@@ -128,30 +142,33 @@ def worker(specs, base, output, stopped):
             captured_at = perf_counter_ns()
             try:
                 result = sample(spec, ImageGrab.grab, templates.get(key))
-                output.put_nowait(("value", key, (captured_at, result)))
+                output.put_nowait(("value", cache_key, (captured_at, result)))
                 reported.discard(key)
             except Full:
                 continue
             except (OSError, ValueError) as error:
                 try:
-                    output.put_nowait(("value", key, (captured_at, False)))
+                    output.put_nowait(("value", cache_key, (captured_at, False)))
                     if key not in reported:
                         output.put_nowait(("error", key, str(error)))
                         reported.add(key)
                 except Full:
                     pass
-        stopped.wait(max(0.02, SAMPLE_SECONDS - (perf_counter_ns() - started) / 1e9))
+        stopped.wait(max(0.02, (SAMPLE_NS - (perf_counter_ns() - started)) / 1e9))
 
 
 class ScreenSensors:
     def __init__(self, specs, base, report, *, sampler=worker):
         context = get_context("spawn")
+        self.requests = context.Queue(maxsize=MAX_SENSORS)
         self.output = context.Queue(maxsize=MAX_SENSORS * 2)
         self.stopped = context.Event()
         self.done = Event()
         self.values = {}
+        self.dynamic_values = OrderedDict()
+        self.requested = OrderedDict()
         self.report = report
-        self.process = context.Process(target=sampler, args=(specs, base, self.output, self.stopped),
+        self.process = context.Process(target=sampler, args=(specs, base, self.requests, self.output, self.stopped),
                                        daemon=True)
         self.reader = Thread(target=self._collect, daemon=True)
 
@@ -162,17 +179,40 @@ class ScreenSensors:
             except Empty:
                 if not self.process.is_alive() and not self.stopped.is_set():
                     self.values.clear()
+                    self.dynamic_values.clear()
                     self.report("", "화면 센서 프로세스가 종료됐습니다.")
                     return
                 continue
             if kind == "value":
-                self.values[key] = value
+                if isinstance(key, tuple):
+                    self.dynamic_values[key] = value
+                    self.dynamic_values.move_to_end(key)
+                    if len(self.dynamic_values) > MAX_DYNAMIC_SAMPLES:
+                        self.dynamic_values.popitem(last=False)
+                else:
+                    self.values[key] = value
             else:
                 self.report(key, value)
 
     def read(self, key):
         timestamp, result = self.values.get(key, (0, False))
         return result and perf_counter_ns() - timestamp <= STALE_NS
+
+    def read_at(self, key, bounds):
+        cache_key = (key, bounds)
+        now = perf_counter_ns()
+        timestamp, result = self.dynamic_values.get(cache_key, (0, False))
+        if now - max(timestamp, self.requested.get(cache_key, 0)) >= SAMPLE_NS:
+            try:
+                self.requests.put_nowait(cache_key)
+            except Full:
+                pass
+            else:
+                self.requested[cache_key] = now
+                self.requested.move_to_end(cache_key)
+                if len(self.requested) > MAX_DYNAMIC_SAMPLES:
+                    self.requested.popitem(last=False)
+        return result and now - timestamp <= STALE_NS
 
     def __enter__(self):
         self.process.start()
@@ -189,4 +229,6 @@ class ScreenSensors:
         self.done.set()
         if self.reader.ident is not None:
             self.reader.join(0.2)
+        self.requests.cancel_join_thread()
+        self.requests.close()
         self.output.close()

@@ -8,4 +8,5 @@ body { background: #e9edf2; color: #182637; font: 14px "Malgun Gothic", sans-ser
 .blocklyHighlightedConnectionPath { stroke: #315de0; }
 .msBreakpoint > .blocklyPath { stroke: #b62b43; stroke-width: 3px; }
 .msBlockHeader { pointer-events: none; }
+.msPanning, .msPanning .blocklyMainBackground { cursor: grabbing; }
 .msBlockHeader text { fill: #fff; font: 600 13px "Malgun Gothic", sans-serif; }

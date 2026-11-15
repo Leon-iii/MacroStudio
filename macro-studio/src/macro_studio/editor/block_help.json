@@ -14,12 +14,12 @@
     "title": "단축키",
     "summary": "프로젝트가 실행 중일 때 지정한 단축키를 누르면 실행 칸에 연결한 작업을 시작합니다.",
     "details": [
-      "단축키에는 CTRL+F7처럼 입력합니다. 실제 입력을 사용하는 세션에서는 CTRL, ALT, SHIFT, WIN 중 하나 이상을 포함합니다.",
+      "키 블록에서 ‘키 듣기’를 누르고 Ctrl+F7처럼 보조키가 포함된 조합을 입력합니다.",
       "조건은 단축키가 들어올 때 확인하며, 비워 두면 제한 없이 받습니다. 실행 칸을 비우면 수행할 작업이 없습니다.",
       "실행 중 무시는 같은 블록의 작업이 진행 중일 때 새 이벤트를 건너뜁니다. 다시 시작은 같은 블록의 기존 작업을 취소합니다. 대기열은 차례를 기다리고, 병렬 실행은 작업을 함께 실행합니다. 우선 실행은 같은 블록의 작업과 우선순위가 낮은 작업을 취소합니다. 우선순위 기본값은 0입니다."
     ],
     "example": "CTRL+F7을 누르면 → A 키를 50 ms 누르기",
-    "related": ["ms_key_tap", "ms_state_hotkey"]
+    "related": ["ms_key", "ms_key_tap", "ms_state_hotkey"]
   },
   "ms_interval": {
     "title": "ms마다",
@@ -49,32 +49,56 @@
     "example": "프로젝트 시작 → '준비 완료' 발행",
     "related": ["ms_custom"]
   },
+  "ms_key": {
+    "title": "키 듣기",
+    "summary": "편집 중 키를 한 번 눌러 이 블록의 키 값을 지정합니다.",
+    "details": ["키 누르기와 연타에는 단일 키를, 단축키 이벤트와 상태 전이에는 조합키를 지정합니다. 값을 유지하려면 화면의 취소 버튼을 누르세요."],
+    "related": ["ms_key_tap", "ms_hotkey", "ms_state_hotkey"]
+  },
   "ms_key_tap": {
     "title": "키 누르기",
     "summary": "선택한 키를 누르고 지정한 시간이 지나면 뗍니다.",
-    "details": ["키 이름은 A, F7, ENTER처럼 입력합니다. 시간은 밀리초이며 50 ms는 0.05초입니다."],
+    "details": ["키 블록에서 ‘키 듣기’를 눌러 A, F7, Enter 같은 단일 키를 지정합니다. 누름 시간에 시간 블록을 연결합니다. 기본값은 50 ms입니다."],
     "example": "프로젝트 시작 → A 키를 50 ms 누르기",
-    "related": ["ms_tap_sequence", "ms_wait"]
+    "related": ["ms_key", "ms_tap_sequence", "ms_duration"]
   },
   "ms_tap_sequence": {
     "title": "키 연타",
     "summary": "같은 키를 지정한 빈도와 횟수로 반복해서 눌렀다 뗍니다.",
     "details": [
-      "Hz는 초당 반복 횟수입니다. ms는 한 번 누르고 있는 시간입니다. 횟수는 예약할 누름의 개수입니다.",
+      "Hz와 횟수에 숫자 또는 산술 연산을 연결합니다. Hz는 1~200 사이의 정수입니다. 한 번 누르는 시간에는 시간 블록을 연결합니다.",
       "누름 시간은 한 회차 간격보다 짧아야 합니다. 예를 들어 100 Hz에서는 한 회차가 10 ms이므로 10 ms 미만을 입력합니다. 예정된 누름 시간이 이미 끝난 회차는 건너뜁니다."
     ],
     "example": "A 키 연타 · 100 Hz · 2 ms · 10회",
     "related": ["ms_key_tap", "ms_repeat"]
   },
+  "ms_position": {
+    "title": "화면 좌표",
+    "summary": "화면의 X, Y 좌표를 지정합니다.",
+    "details": ["X, Y에 숫자, 변수 또는 산술 연산을 연결합니다. 소수는 가장 가까운 픽셀로 반올림합니다. 실입력 시 좌표가 대상 창 위에 있어야 합니다."],
+    "related": ["ms_mouse_move", "ms_mouse_click_at"]
+  },
+  "ms_mouse_move": {
+    "title": "지정 좌표로 마우스 이동",
+    "summary": "현재 위치에서 지정 좌표까지 연결한 시간 동안 마우스를 움직입니다.",
+    "details": ["시간 값이 0이면 바로 이동합니다. 지정한 좌표가 대상 창 밖에 있으면 이동을 중단합니다."],
+    "related": ["ms_position", "ms_duration", "ms_mouse_click_at"]
+  },
+  "ms_mouse_click_at": {
+    "title": "지정 좌표 클릭",
+    "summary": "지정한 좌표로 이동해 선택한 마우스 버튼을 클릭합니다.",
+    "details": ["기본 버튼은 왼쪽입니다. 실입력에서는 대상 창 위의 좌표를 선택하세요."],
+    "related": ["ms_position", "ms_mouse_move", "ms_mouse_click"]
+  },
   "ms_mouse_click": {
     "title": "마우스 버튼 누르기",
     "summary": "현재 포인터 위치에서 왼쪽, 오른쪽, 가운데 중 선택한 버튼을 눌렀다 뗍니다.",
     "details": [
-      "누름 시간은 밀리초입니다. 포인터는 현재 위치에 그대로 있습니다.",
+      "누름 시간에 시간 블록을 연결합니다. 기본값은 50 ms입니다. 포인터는 현재 위치에 그대로 있습니다.",
       "실제 입력 세션에서는 대상 창이 전면에 있고 포인터가 그 창 위에 있어야 합니다."
     ],
     "example": "단축키 CTRL+F7 → 마우스 왼쪽 버튼을 50 ms 누르기",
-    "related": ["ms_target_window"]
+    "related": ["ms_target_window", "ms_duration"]
   },
   "ms_wait": {
     "title": "기다리기",
@@ -90,10 +114,10 @@
   },
   "ms_duration": {
     "title": "시간 값",
-    "summary": "숫자와 단위를 묶어 대기 시간을 지정합니다.",
+    "summary": "숫자와 단위를 묶어 시간을 지정합니다.",
     "details": ["숫자, 숫자 변수 또는 숫자를 반환하는 연산을 연결합니다. ms는 밀리초, sec는 초, min은 분입니다."],
     "example": "1 ÷ 2를 연결하고 sec 선택 → 0.5초",
-    "related": ["ms_wait_time", "ms_number", "ms_binary"]
+    "related": ["ms_wait_time", "ms_number", "ms_arithmetic"]
   },
   "ms_repeat": {
     "title": "횟수 반복",
@@ -171,6 +195,22 @@
     "title": "문자열",
     "summary": "입력한 글자를 문자열 값으로 전달합니다. 예를 들어 '준비 완료'를 문자열 변수에 저장할 수 있습니다."
   },
+  "ms_arithmetic": {
+    "title": "산술 연산",
+    "summary": "두 숫자를 더하거나 빼거나 곱하거나 나눕니다.",
+    "related": ["ms_number", "ms_comparison"]
+  },
+  "ms_comparison": {
+    "title": "비교 연산",
+    "summary": "두 값을 비교해 참 또는 거짓을 반환합니다.",
+    "details": ["같음과 다름은 같은 타입의 값을 비교합니다. 크기 비교에는 숫자를 연결합니다."],
+    "related": ["ms_arithmetic", "ms_logical", "ms_if"]
+  },
+  "ms_logical": {
+    "title": "논리 연산",
+    "summary": "두 조건을 ‘그리고’나 ‘또는’으로 결합합니다.",
+    "related": ["ms_comparison", "ms_not"]
+  },
   "ms_binary": {
     "title": "두 값 연산",
     "summary": "두 값으로 계산하거나 비교합니다. 가운데에서 연산을 고릅니다.",
@@ -190,7 +230,7 @@
   "ms_pixel_color": {
     "title": "픽셀 색상 일치",
     "summary": "화면의 한 점이 지정한 색상과 정확히 일치하면 참을 반환합니다.",
-    "details": ["X와 Y에 화면 좌표를 입력합니다. 색상은 #ffffff처럼 입력합니다. 센서가 아직 값을 읽지 못했거나 최근 값이 만료되면 거짓을 반환합니다."],
+    "details": ["검사할 점을 좌표 블록으로 지정합니다. 색상 필드를 눌러 RGB 값을 입력하거나 스포이드로 화면 색상을 선택합니다. 최신 샘플이 없으면 거짓을 반환합니다."],
     "example": "X 120, Y 80의 색상이 #00ff00과 일치하면 → 상태 전이",
     "related": ["ms_state_condition", "ms_region_image"]
   },
@@ -204,14 +244,14 @@
   "ms_region_image": {
     "title": "영역에 이미지 있음",
     "summary": "화면의 지정 영역에서 등록한 이미지와 픽셀이 똑같은 부분을 찾으면 참을 반환합니다.",
-    "details": ["X와 Y는 영역 왼쪽 위 좌표입니다. 너비와 높이는 픽셀 단위입니다. 이미지 파일에는 PNG, BMP 또는 JPEG 경로를 입력합니다. 상대 경로는 저장한 프로젝트 폴더를 기준으로 합니다."],
-    "example": "X 0, Y 0의 320 × 240 영역에 template.png가 있으면 → 상태 전이",
+    "details": ["좌표 블록은 영역의 왼쪽 위를 지정합니다. 너비와 높이에는 1~1024픽셀 범위의 값을 계산하는 산술 블록을 연결할 수 있습니다. 상단 이미지 메뉴에서 기준 이미지를 등록한 뒤 블록에서 선택합니다."],
+    "example": "X 0, Y 0의 320 × 240 영역에서 등록한 ‘확인 버튼’ 이미지가 발견되면 상태 전이",
     "related": ["ms_pixel_color", "ms_region_text"]
   },
   "ms_region_text": {
     "title": "영역에 텍스트 있음",
     "summary": "화면의 지정 영역을 읽어 입력한 문구를 찾으면 참을 반환합니다. Tesseract OCR이 필요합니다.",
-    "details": ["X와 Y는 영역 왼쪽 위 좌표입니다. 너비와 높이는 픽셀 단위입니다. 찾을 문구와 OCR 언어를 선택합니다. 검색할 때 대소문자를 구분하지 않고 연속 공백은 하나로 처리합니다."],
+    "details": ["좌표 블록은 영역의 왼쪽 위를 지정합니다. 너비와 높이에는 1~1024픽셀 범위의 값을 계산하는 산술 블록을 연결할 수 있습니다. 찾을 문구와 OCR 언어를 선택합니다. 검색할 때 대소문자를 구분하지 않고 연속 공백은 하나로 처리합니다."],
     "example": "영역에서 'READY'라는 영어 문구를 찾으면 → 상태 전이",
     "related": ["ms_region_image", "ms_state_condition"]
   },
@@ -287,7 +327,7 @@
   "ms_state_hotkey": {
     "title": "핫키로 상태 전이",
     "summary": "현재 상태가 출발 상태와 같을 때 지정한 핫키를 누르면 도착 상태로 이동합니다.",
-    "details": ["출발과 도착에는 서로 다른 상태 이름을 입력합니다. 핫키에는 CTRL+F7처럼 입력합니다. 추가 조건을 연결하면 참일 때만 이동하며, 비우면 핫키만 확인합니다."],
+    "details": ["출발과 도착에는 서로 다른 상태 이름을 입력합니다. 키 블록의 ‘키 듣기’에서 Ctrl+F7 같은 조합을 지정합니다. 추가 조건을 연결하면 참일 때만 이동하며, 비우면 핫키만 확인합니다."],
     "example": "'실행'에서 '대기'로 → CTRL+F7을 누르면 이동",
     "related": ["ms_state", "ms_hotkey"]
   }

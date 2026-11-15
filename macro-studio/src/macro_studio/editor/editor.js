@@ -2,7 +2,8 @@
 
 const palette = {
   event: "#9a4a0e", input: "#2459a6", time: "#20646d", control: "#356843",
-  data: "#70458c", workflow: "#59607b", state: "#744756",
+  data: "#70458c", variable: "#a63268", arithmetic: "#795600", logic: "#6440a3",
+  workflow: "#59607b", state: "#744756",
 };
 const input = (name, text) => ({type: "field_input", name, text});
 const label = (name, text) => ({type: "field_label", name, text});
@@ -17,30 +18,91 @@ const policy = () => dropdown("POLICY", [
   ["병렬 실행", "parallel"], ["우선 실행", "override"],
 ]);
 const priority = () => number("PRIORITY", 0, -2147483648, 2147483647, 1);
-const coordinate = name => number(name, 0, -32768, 32767, 1);
 const valueTypes = [["숫자", "number"], ["불리언", "boolean"], ["문자열", "string"]];
 const workflowList = (name, check) => ({type: "input_statement", name, check});
 const statement = (type, category, message0, args0 = [], extra = {}) => ({
   type: "ms_" + type, colour: palette[category], message0, args0,
   tooltip: message0.replace(/%\d+/g, "").trim(), previousStatement: null, nextStatement: null, ...extra,
 });
-const expression = (type, message0, args0, output) => ({
-  type: "ms_" + type, colour: palette.data, message0, args0, output,
+const expression = (type, message0, args0, output, category = "data") => ({
+  type: "ms_" + type, colour: palette[category], message0, args0, output,
   tooltip: message0.replace(/%\d+/g, "").trim(),
 });
 const hat = (type, category, message0, args0, extra = {}) => ({
   type: "ms_" + type, colour: palette[category], message0, args0, hat: "cap",
   tooltip: message0.replace(/%\d+/g, "").trim(), ...extra,
 });
-const operators = [
-  ["+", "add"], ["−", "sub"], ["×", "mul"], ["÷", "div"], ["=", "eq"], ["≠", "ne"],
-  ["<", "lt"], ["≤", "le"], [">", "gt"], ["≥", "ge"], ["그리고", "and"], ["또는", "or"],
+const arithmeticOperators = [["+", "add"], ["−", "sub"], ["×", "mul"], ["÷", "div"]];
+const comparisonOperators = [
+  ["=", "eq"], ["≠", "ne"], ["<", "lt"], ["≤", "le"], [">", "gt"], ["≥", "ge"],
 ];
+const logicalOperators = [["그리고", "and"], ["또는", "or"]];
+let pickColour;
+class StudioColourField extends Blockly.FieldTextInput {
+  static fromJson(options) {
+    return new StudioColourField(options.text);
+  }
+
+  showEditor_() {
+    pickColour?.(this.getValue(), colour => {
+      if (colour && this.getSourceBlock()) this.setValue(colour);
+    });
+  }
+}
+Blockly.fieldRegistry.register("field_studio_colour", StudioColourField);
+
+let listenForKey;
+const hotkeyBlocks = new Set(["ms_hotkey", "ms_state_hotkey"]);
+const singleKeyBlocks = new Set(["ms_key_tap", "ms_tap_sequence"]);
+
+class StudioKeyField extends Blockly.FieldTextInput {
+  static fromJson(options) {
+    return new StudioKeyField(options.text);
+  }
+
+  getText_() {
+    return `${this.getValue()} · 키 듣기`;
+  }
+
+  showEditor_() {
+    const parent = this.getSourceBlock()?.getParent()?.type;
+    const mode = hotkeyBlocks.has(parent) ? "hotkey" : singleKeyBlocks.has(parent) ? "single" : "";
+    listenForKey?.(mode, key => {
+      if (key && this.getSourceBlock()) this.setValue(key);
+    });
+  }
+}
+Blockly.fieldRegistry.register("field_studio_key", StudioKeyField);
+
+let imageAssetOptions = [["이미지 선택", ""]];
+class ImageAssetField extends Blockly.FieldDropdown {
+  static fromJson() {
+    return new ImageAssetField(() => imageAssetOptions);
+  }
+
+  getOptions() {
+    const options = super.getOptions();
+    const selected = this.getValue();
+    if (!selected || options.some(([, id]) => id === selected)) return options;
+    return [...options, [selected.startsWith("asset:") ? "등록되지 않은 이미지" : selected, selected]];
+  }
+
+  doClassValidation_(value) {
+    return typeof value === "string" ? value : null;
+  }
+
+  refreshAssets() {
+    this.doValueUpdate_(this.getValue());
+    this.forceRerender();
+  }
+}
+Blockly.fieldRegistry.register("field_studio_image_asset", ImageAssetField);
+
 Blockly.defineBlocksWithJsonArray([
   hat("start", "event", "%1 %2 우선순위 %3 조건 %4 %5",
     [label("TITLE", "프로젝트 시작"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
   hat("hotkey", "event", "%1 %2 %3 우선순위 %4 조건 %5 %6",
-    [label("TITLE", "단축키"), input("KEY", "CTRL+F7"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
+    [label("TITLE", "단축키"), value("KEY", "Key"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
   hat("interval", "event", "%1 %2 %3 우선순위 %4 조건 %5 %6",
     [number("MS", 1000, 1, 86400000, 1), label("TITLE", "ms마다"),
      policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
@@ -48,17 +110,26 @@ Blockly.defineBlocksWithJsonArray([
     [label("TITLE", "이벤트"), input("NAME", "준비 완료"), label("TITLE_END", "를 받으면"),
      policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
   statement("emit_event", "event", "이벤트 %1 발행", [input("NAME", "준비 완료")]),
-  statement("key_tap", "input", "%1 키를 %2 ms 누르기", [input("KEY", "A"), number("MS", 50, 0.001, 86400000, 0.001)]),
-  statement("mouse_click", "input", "마우스 %1 버튼을 %2 ms 누르기",
+  expression("key", "%1", [{type: "field_studio_key", name: "VALUE", text: "A"}], "Key", "input"),
+  statement("key_tap", "input", "%1 키를 %2 동안 누르기", [value("KEY", "Key"), value("DURATION", "Duration")],
+    {inputsInline: true}),
+  statement("mouse_click", "input", "마우스 %1 버튼을 %2 동안 누르기",
     [dropdown("BUTTON", [["왼쪽", "left"], ["오른쪽", "right"], ["가운데", "middle"]]),
-     number("MS", 50, 0.001, 86400000, 0.001)]),
-  statement("tap_sequence", "input", "%1 키 연타 %2 Hz · %3 ms · %4 회",
-    [input("KEY", "A"), number("HZ", 100, 1, 200, 1), number("MS", 2, 0.001, 999, 0.001), number("COUNT", 10, 1, 1000000, 1)]),
+     value("DURATION", "Duration")], {inputsInline: true}),
+  {...expression("position", "좌표 X %1 Y %2", [value("X", "Number"), value("Y", "Number")], "Position"),
+    colour: palette.input, inputsInline: true},
+  statement("mouse_move", "input", "마우스를 %1 로 %2 동안 움직이기",
+    [value("POSITION", "Position"), value("DURATION", "Duration")], {inputsInline: true}),
+  statement("mouse_click_at", "input", "%1 를 %2 하기", [value("POSITION", "Position"),
+    dropdown("BUTTON", [["좌클릭", "left"], ["우클릭", "right"], ["가운데 클릭", "middle"]])], {inputsInline: true}),
+  statement("tap_sequence", "input", "%1 키 연타 %2 Hz · %3 · %4 회",
+    [value("KEY", "Key"), value("HZ", "Number"), value("DURATION", "Duration"), value("COUNT", "Number")],
+    {inputsInline: true}),
   statement("wait", "time", "%1 ms만큼 기다리기", [number("MS", 100, 0, 86400000, 0.001)]),
   statement("wait_time", "time", "%1 만큼 기다리기", [value("DURATION", "Duration")], {inputsInline: true}),
   {...expression("duration", "%1 %2", [value("VALUE", "Number"),
     dropdown("UNIT", [["sec", "sec"], ["ms", "ms"], ["min", "min"]])], "Duration"),
-    colour: palette.time, inputsInline: true, tooltip: "숫자와 단위를 묶어 대기 시간을 지정합니다."},
+    colour: palette.time, inputsInline: true, tooltip: "숫자와 단위를 묶어 시간을 지정합니다."},
   statement("repeat", "control", "%1 회 반복", [value("COUNT", "Number")],
     {message1: "%1", args1: [stack("BODY")], inputsInline: true}),
   statement("forever", "control", "계속 반복", [], {message1: "%1", args1: [stack("BODY")]}),
@@ -70,27 +141,35 @@ Blockly.defineBlocksWithJsonArray([
   statement("break", "control", "반복 탈출", [], {nextStatement: undefined}),
   statement("continue", "control", "다음 반복", [], {nextStatement: undefined}),
   statement("end", "control", "이 작업 종료", [], {nextStatement: undefined}),
-  statement("set", "data", "변수 %1 에 %2 저장", [input("NAME", "enabled"), value("VALUE")]),
-  expression("number", "%1", [number("VALUE", 1)], "Number"),
-  expression("boolean", "%1", [dropdown("VALUE", [["참", "TRUE"], ["거짓", "FALSE"]])], "Boolean"),
-  expression("text", "문자열 %1", [input("VALUE", "")], "String"),
-  expression("variable", "변수 %1", [input("NAME", "enabled")], null),
-  {...expression("binary", "%1 %2 %3", [value("A"), dropdown("OP", operators), value("B")], null),
+  statement("set", "variable", "변수 %1 에 %2 저장", [input("NAME", "enabled"), value("VALUE")]),
+  expression("number", "%1", [number("VALUE", 1)], "Number", "arithmetic"),
+  expression("boolean", "%1", [dropdown("VALUE", [["참", "TRUE"], ["거짓", "FALSE"]])], "Boolean", "logic"),
+  expression("text", "문자열 %1", [input("VALUE", "")], "String", "variable"),
+  expression("variable", "변수 %1", [input("NAME", "enabled")], null, "variable"),
+  {...expression("binary", "%1 %2 %3", [value("A"),
+    dropdown("OP", [...arithmeticOperators, ...comparisonOperators, ...logicalOperators]), value("B")], null),
     inputsInline: true},
-  expression("not", "%1 의 반대", [value("VALUE", "Boolean")], "Boolean"),
-  {...expression("pixel_color", "픽셀 X %1 Y %2 색상 %3 일치",
-    [coordinate("X"), coordinate("Y"), input("COLOR", "#ffffff")], "Boolean"), colour: "#23627c"},
+  {...expression("arithmetic", "%1 %2 %3", [value("A", "Number"),
+    dropdown("OP", arithmeticOperators), value("B", "Number")], "Number", "arithmetic"), inputsInline: true},
+  {...expression("comparison", "%1 %2 %3", [value("A"), dropdown("OP", comparisonOperators), value("B")], "Boolean", "logic"),
+    inputsInline: true},
+  {...expression("logical", "%1 %2 %3", [value("A", "Boolean"),
+    dropdown("OP", logicalOperators), value("B", "Boolean")], "Boolean", "logic"),
+    inputsInline: true},
+  expression("not", "%1 의 반대", [value("VALUE", "Boolean")], "Boolean", "logic"),
+  {...expression("pixel_color", "픽셀 %1 색상 %2 일치",
+    [value("POSITION", "Position"), {type: "field_studio_colour", name: "COLOR", text: "#ffffff"}],
+    "Boolean"), colour: "#23627c", inputsInline: true},
   {...expression("target_window", "대상 창 상태가 %1",
     [dropdown("STATE", [["전면", "foreground"], ["열려 있음", "exists"], ["최소화", "minimized"]])],
     "Boolean"), colour: "#23627c"},
-  {...expression("region_image", "영역 X %1 Y %2 너비 %3 높이 %4 에 이미지 %5 있음",
-    [coordinate("X"), coordinate("Y"), number("WIDTH", 320, 1, 1024, 1),
-     number("HEIGHT", 240, 1, 1024, 1), input("IMAGE", "template.png")], "Boolean"), colour: "#23627c"},
-  {...expression("region_text", "영역 X %1 Y %2 너비 %3 높이 %4 에 텍스트 %5 있음 %6",
-    [coordinate("X"), coordinate("Y"), number("WIDTH", 320, 1, 1024, 1),
-     number("HEIGHT", 240, 1, 1024, 1), input("TEXT", "READY"),
+  {...expression("region_image", "영역 %1 너비 %2 높이 %3 에 이미지 %4 있음",
+    [value("POSITION", "Position"), value("WIDTH", "Number"), value("HEIGHT", "Number"),
+     {type: "field_studio_image_asset", name: "IMAGE"}], "Boolean"), colour: "#23627c", inputsInline: true},
+  {...expression("region_text", "영역 %1 너비 %2 높이 %3 에 텍스트 %4 있음 %5",
+    [value("POSITION", "Position"), value("WIDTH", "Number"), value("HEIGHT", "Number"), input("TEXT", "READY"),
      dropdown("LANGUAGE", [["영어", "eng"], ["한국어", "kor"], ["한국어+영어", "kor+eng"]])],
-    "Boolean"), colour: "#23627c"},
+    "Boolean"), colour: "#23627c", inputsInline: true},
   hat("workflow", "workflow", "%1 반환 타입 %2",
     [input("NAME", "작업"), dropdown("RETURNS", [["없음", "void"], ...valueTypes])],
     {message1: "매개변수 %1", args1: [workflowList("PARAMS", "ParameterList")],
@@ -115,16 +194,18 @@ Blockly.defineBlocksWithJsonArray([
   hat("state_condition", "state", "전이 %1 에서 %2 로 조건 %3",
     [input("FROM", "대기"), input("TO", "실행"), value("GUARD", "Boolean")]),
   hat("state_hotkey", "state", "전이 %1 에서 %2 로 핫키 %3 추가 조건 %4",
-    [input("FROM", "실행"), input("TO", "대기"), input("KEY", "CTRL+F7"), value("GUARD", "Boolean")]),
+    [input("FROM", "실행"), input("TO", "대기"), value("KEY", "Key"), value("GUARD", "Boolean")]),
 ]);
 
 const categories = [
   ["이벤트", "event", ["start", "hotkey", "interval", "custom", "emit_event"]],
-  ["키보드", "input", ["key_tap", "tap_sequence"]],
-  ["마우스", "input", ["mouse_click"]],
+  ["키보드", "input", ["key", "key_tap", "tap_sequence"]],
+  ["마우스", "input", ["position", "mouse_move", "mouse_click_at", "mouse_click"]],
   ["시간", "time", ["duration", "wait_time"]],
   ["제어", "control", ["repeat", "forever", "while", "if_only", "if", "break", "continue", "end"]],
-  ["변수·연산", "data", ["set", "variable", "number", "boolean", "text", "binary", "not"]],
+  ["변수", "variable", ["set", "variable", "text"]],
+  ["산술 연산", "arithmetic", ["number", "arithmetic"]],
+  ["논리 연산", "logic", ["boolean", "comparison", "logical", "not"]],
   ["화면 센서", "screen", ["pixel_color", "region_image", "region_text", "target_window"]],
   ["워크플로", "workflow", ["workflow", "param_def", "parameter", "argument", "call", "call_store", "call_if", "return"]],
   ["상태 머신", "state", ["state", "state_condition", "state_hotkey"]],
@@ -132,24 +213,43 @@ const categories = [
 
 const numberShadow = VALUE => ({shadow: {type: "ms_number", fields: {VALUE}}});
 const booleanShadow = enabled => ({shadow: {type: "ms_boolean", fields: {VALUE: enabled ? "TRUE" : "FALSE"}}});
+const keyShadow = VALUE => ({shadow: {type: "ms_key", fields: {VALUE}}});
 const durationInputs = {VALUE: numberShadow(1)};
+const durationInput = (amount, unit) => ({block: {type: "ms_duration", fields: {UNIT: unit},
+  inputs: {VALUE: numberShadow(amount)}}});
+const defaultDuration = durationInput(1, "sec");
+const defaultHold = {DURATION: durationInput(50, "ms")};
+const positionInputs = {X: numberShadow(0), Y: numberShadow(0)};
+const defaultPosition = {block: {type: "ms_position", inputs: positionInputs}};
+const defaultRegion = {POSITION: defaultPosition, WIDTH: numberShadow(320), HEIGHT: numberShadow(240)};
 const optionalGuard = {GUARD: booleanShadow(true)};
 const inactiveCondition = {CONDITION: booleanShadow(false)};
 const toolboxInputs = {
   start: optionalGuard,
-  hotkey: optionalGuard,
+  hotkey: {...optionalGuard, KEY: keyShadow("CTRL+F7")},
   interval: optionalGuard,
   custom: optionalGuard,
   duration: durationInputs,
-  wait_time: {DURATION: {block: {type: "ms_duration", fields: {UNIT: "sec"}, inputs: durationInputs}}},
+  key_tap: {...defaultHold, KEY: keyShadow("A")},
+  mouse_click: defaultHold,
+  tap_sequence: {KEY: keyShadow("A"), HZ: numberShadow(100), DURATION: durationInput(2, "ms"), COUNT: numberShadow(10)},
+  position: positionInputs,
+  wait_time: {DURATION: defaultDuration},
+  mouse_move: {POSITION: defaultPosition, DURATION: defaultDuration},
+  mouse_click_at: {POSITION: defaultPosition},
+  pixel_color: {POSITION: defaultPosition},
+  region_image: defaultRegion,
+  region_text: defaultRegion,
   repeat: {COUNT: numberShadow(1)},
   while: inactiveCondition,
   if_only: inactiveCondition,
   if: inactiveCondition,
-  binary: {A: numberShadow(0), B: numberShadow(1)},
+  arithmetic: {A: numberShadow(0), B: numberShadow(1)},
+  comparison: {A: numberShadow(0), B: numberShadow(1)},
+  logical: {A: booleanShadow(false), B: booleanShadow(true)},
   not: {VALUE: booleanShadow(false)},
   state_condition: {GUARD: booleanShadow(false)},
-  state_hotkey: optionalGuard,
+  state_hotkey: {...optionalGuard, KEY: keyShadow("CTRL+F7")},
 };
 
 const headerWidth = 276;
@@ -159,7 +259,7 @@ const headerFieldGap = 6;
 const workflowBodyInset = 12;
 const headerFields = {
   ms_start: ["TITLE"],
-  ms_hotkey: ["TITLE", "KEY"],
+  ms_hotkey: ["TITLE"],
   ms_interval: ["MS", "TITLE"],
   ms_custom: ["TITLE", "NAME", "TITLE_END"],
   ms_workflow: ["NAME"],
@@ -190,13 +290,26 @@ function headerLines(block) {
     case "ms_state_condition":
       return [field("FROM") + " → " + field("TO"), condition ? guard : "조건 연결 필요"];
     case "ms_state_hotkey": return [field("FROM") + " → " + field("TO"),
-      field("KEY") + (condition ? " · " + condition : "")];
+      (block.getInputTargetBlock("KEY")?.getFieldValue("VALUE") || "키 선택") + (condition ? " · " + condition : "")];
     default: return [];
   }
 }
 
 function updateBlockHeader(block) {
   if (!block || block.previousConnection || block.outputConnection || !block.getSvgRoot()) return;
+  if (block.type === "ms_hotkey") {
+    const title = block.getField("TITLE");
+    const key = block.getInputTargetBlock("KEY")?.getFieldValue("VALUE");
+    const text = key ? `단축키 ${key}` : "단축키";
+    if (title.getValue() !== text) {
+      Blockly.Events.disable();
+      try {
+        title.setValue(text);
+      } finally {
+        Blockly.Events.enable();
+      }
+    }
+  }
   const root = block.getSvgRoot();
   const lines = headerLines(block);
   let group = root.querySelector(":scope > .msBlockHeader");
@@ -348,6 +461,55 @@ const workspace = Blockly.inject("workspace", {
   move: {scrollbars: true, drag: true, wheel: true},
 });
 
+const workspaceSvg = workspace.getParentSvg();
+let rightPan;
+
+workspaceSvg.addEventListener("pointerdown", event => {
+  if (event.pointerType !== "mouse" || event.button !== 2 || event.buttons !== 2 ||
+      !event.target.classList.contains("blocklyMainBackground")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  workspace.markFocused();
+  workspace.hideChaff();
+  rightPan = {id: event.pointerId, x: event.clientX, y: event.clientY,
+    scrollX: workspace.scrollX, scrollY: workspace.scrollY, dragging: false};
+  workspaceSvg.setPointerCapture(event.pointerId);
+}, true);
+
+function panWorkspace(event) {
+  const dx = event.clientX - rightPan.x;
+  const dy = event.clientY - rightPan.y;
+  if (!rightPan.dragging && Math.hypot(dx, dy) < 4) return;
+  if (!rightPan.dragging) {
+    rightPan.dragging = true;
+    workspaceSvg.classList.add("msPanning");
+  }
+  workspace.scroll(rightPan.scrollX + dx, rightPan.scrollY + dy);
+}
+
+function endRightPan(event) {
+  if (rightPan?.id !== event.pointerId) return;
+  rightPan = undefined;
+  workspaceSvg.classList.remove("msPanning");
+}
+
+workspaceSvg.addEventListener("pointermove", event => {
+  if (rightPan?.id !== event.pointerId) return;
+  event.stopPropagation();
+  if (event.buttons & 2) panWorkspace(event);
+  else endRightPan(event);
+}, true);
+workspaceSvg.addEventListener("pointerup", event => {
+  if (rightPan?.id !== event.pointerId) return;
+  event.stopPropagation();
+  panWorkspace(event);
+  const dragged = rightPan.dragging;
+  endRightPan(event);
+  if (!dragged) workspace.showContextMenu(event);
+}, true);
+workspaceSvg.addEventListener("pointercancel", endRightPan);
+workspaceSvg.addEventListener("lostpointercapture", endRightPan);
+
 const workflowTools = categories.find(([, color]) => color === "workflow")[2];
 let shownWorkflowNames = [];
 
@@ -379,8 +541,69 @@ function refreshWorkflowCategory() {
   }
 }
 
+function upgradeBlockInputs(block) {
+  const isRegion = block.type === "ms_region_image" || block.type === "ms_region_text";
+  if ((hotkeyBlocks.has(block.type) || singleKeyBlocks.has(block.type)) && typeof block.fields?.KEY === "string") {
+    block.inputs ??= {};
+    block.inputs.KEY ??= keyShadow(block.fields.KEY);
+    delete block.fields.KEY;
+  }
+  if (["ms_key_tap", "ms_tap_sequence", "ms_mouse_click"].includes(block.type) && block.fields) {
+    block.inputs ??= {};
+    if ("MS" in block.fields) {
+      block.inputs.DURATION ??= durationInput(block.fields.MS, "ms");
+      delete block.fields.MS;
+    }
+    if (block.type === "ms_tap_sequence") {
+      for (const name of ["HZ", "COUNT"]) {
+        if (name in block.fields) {
+          block.inputs[name] ??= numberShadow(block.fields[name]);
+          delete block.fields[name];
+        }
+      }
+    }
+  }
+  if ((isRegion || block.type === "ms_pixel_color") && block.fields) {
+    block.inputs ??= {};
+    if ("X" in block.fields || "Y" in block.fields) {
+      block.inputs.POSITION ??= {block: {type: "ms_position", fields: {X: block.fields.X ?? 0, Y: block.fields.Y ?? 0}}};
+      delete block.fields.X;
+      delete block.fields.Y;
+    }
+  }
+  if ((isRegion || block.type === "ms_position") && block.fields) {
+    block.inputs ??= {};
+    for (const name of isRegion ? ["WIDTH", "HEIGHT"] : ["X", "Y"]) {
+      if (name in block.fields) {
+        block.inputs[name] ??= numberShadow(block.fields[name]);
+        delete block.fields[name];
+      }
+    }
+  }
+  for (const connection of Object.values(block.inputs ?? {})) {
+    if (connection.shadow?.type === "ms_position") {
+      connection.block ??= connection.shadow;
+      delete connection.shadow;
+    }
+    if (connection.block) upgradeBlockInputs(connection.block);
+  }
+  if (block.next?.block) upgradeBlockInputs(block.next.block);
+}
+
 new QWebChannel(qt.webChannelTransport, channel => {
   const bridge = channel.objects.bridge;
+  pickColour = (initial, done) => bridge.chooseColour(initial, done);
+  listenForKey = (mode, done) => bridge.chooseKey(mode, done);
+  bridge.imageAssetsChanged.connect(data => {
+    const options = Object.entries(JSON.parse(data)).map(([id, name]) => [name, id]);
+    options.sort(([first], [second]) => first.localeCompare(second, "ko"));
+    imageAssetOptions = [["이미지 선택", ""], ...options];
+    for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
+      for (const block of editor.getAllBlocks(false)) {
+        if (block.type === "ms_region_image") block.getField("IMAGE").refreshAssets();
+      }
+    }
+  });
   let workspacePublishQueued = false;
   const headersToRefresh = new Set();
   function scheduleWorkspacePublish() {
@@ -421,7 +644,9 @@ new QWebChannel(qt.webChannelTransport, channel => {
     viewing = true;
     try {
       Blockly.Events.disable();
-      Blockly.serialization.workspaces.load(JSON.parse(data), workspace);
+      const state = JSON.parse(data);
+      state.blocks?.blocks?.forEach(upgradeBlockInputs);
+      Blockly.serialization.workspaces.load(state, workspace);
       workspace.getAllBlocks(false).forEach(styleBreakpoint);
       workspace.clearUndo();
       if (workspace.getTopBlocks(false).length) {

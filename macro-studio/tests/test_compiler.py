@@ -26,6 +26,32 @@ def test_invalid_hotkey_error_names_block():
         compile_project(project({"type": "ms_hotkey", "id": "trigger", "fields": {"KEY": "broken"}}))
 
 
+@pytest.mark.parametrize(("trigger_key", "action_key", "error_block"), [
+    ("ctrl+f7", "ESC", None),
+    ("F7", "A", "trigger"),
+    ("CTRL+F7", "CTRL+A", "tap"),
+])
+def test_key_objects_validate_their_connection_and_drive_hotkey_trigger(trigger_key, action_key, error_block):
+    def key(value):
+        return {"shadow": {"type": "ms_key", "fields": {"VALUE": value}}}
+
+    tap = {"type": "ms_key_tap", "id": "tap", "fields": {"MS": 2}, "inputs": {"KEY": key(action_key)}}
+    trigger = {"type": "ms_hotkey", "id": "trigger", "inputs": {"KEY": key(trigger_key), "BODY": {"block": tap}}}
+    if error_block:
+        with pytest.raises(ValidationError, match=rf"\({error_block}\)"):
+            compile_project(project(trigger))
+        return
+    code, _ = compile_project(project(trigger))
+    clock = VirtualClock()
+    backend = FakeInputBackend(clock)
+    runtime = Runtime(code, clock, backend)
+    runtime.run(10_000_000, [(1_000_000, "CTRL+F7")])
+    assert not runtime.errors
+    assert [(edge["action"], edge["key"]) for edge in backend.events] == [
+        ("key_down", "scan:01"), ("key_up", "scan:01"),
+    ]
+
+
 @pytest.mark.parametrize(("unit", "divisor"), [("ms", 2), ("sec", 2_000), ("min", 120_000)])
 def test_wait_uses_live_numeric_expression_and_selected_unit(unit, divisor):
     def block(kind, fields=None, **inputs):
@@ -61,3 +87,45 @@ def test_wait_uses_shadow_defaults_and_prefers_an_explicit_input():
     amount["block"] = {"type": "ms_number", "id": "explicit", "fields": {"VALUE": 2}}
     code, _ = compile_project(project(start))
     assert code["workflows"]["@start"]["steps"][0]["duration"] == {"value": 2, "unit": "sec"}
+
+
+@pytest.mark.parametrize("hold_ms", [2, 20])
+def test_mouse_hold_and_keyboard_sequence_use_connected_values(hold_ms):
+    def block(kind, identifier, fields=None, **inputs):
+        return {"type": f"ms_{kind}", "id": identifier, "fields": fields or {},
+                "inputs": {name: {"block": child} for name, child in inputs.items()}}
+
+    def number(identifier, value):
+        return block("number", identifier, {"VALUE": value})
+
+    def arithmetic(identifier, op, left, right):
+        return block("arithmetic", identifier, {"OP": op}, A=number(f"{identifier}-a", left),
+                     B=number(f"{identifier}-b", right))
+
+    def duration(identifier, unit, amount):
+        return block("duration", identifier, {"UNIT": unit}, VALUE=amount)
+
+    mouse = block("mouse_click", "mouse", {"BUTTON": "left"},
+                  DURATION=duration("mouse-hold", "ms", arithmetic("mouse-time", "add", 1, 2)))
+    key = block("key_tap", "key", {"KEY": "A"}, DURATION=duration("key-hold", "sec", number("seconds", 0.004)))
+    sequence = block("tap_sequence", "sequence", {"KEY": "B"}, HZ=arithmetic("hz", "div", 150, 3),
+                     DURATION=duration("seq-hold", "ms", arithmetic("hold", "add", hold_ms - 1, 1)),
+                     COUNT=arithmetic("count", "add", 1, 2))
+    mouse["next"] = {"block": key}
+    key["next"] = {"block": sequence}
+    code, _ = compile_project(project(block("start", "start", BODY=mouse)))
+    clock = VirtualClock()
+    backend = FakeInputBackend(clock)
+    runtime = Runtime(code, clock, backend)
+    runtime.run(100_000_000, [])
+    events = [(event["time_ns"] // 1_000_000, event["action"]) for event in backend.events]
+    assert events[:4] == [(0, "mouse_down"), (3, "mouse_up"), (3, "key_down"), (7, "key_up")]
+    if hold_ms == 2:
+        assert not runtime.errors
+        assert events[4:] == [(7, "key_down"), (9, "key_up"), (27, "key_down"), (29, "key_up"),
+                              (47, "key_down"), (49, "key_up")]
+    else:
+        assert events[4:] == []
+        assert [(error["code"], error["block_id"]) for error in runtime.errors] == [
+            ("tap_sequence_duration", "sequence"),
+        ]

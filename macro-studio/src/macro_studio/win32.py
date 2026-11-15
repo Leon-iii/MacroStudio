@@ -93,6 +93,7 @@ class WindowsDesktop:
         self._foreground = self._bind(user32.GetForegroundWindow, w.HWND)
         self._iconic = self._bind(user32.IsIconic, w.BOOL, w.HWND)
         self._cursor = self._bind(user32.GetCursorPos, w.BOOL, c.POINTER(w.POINT))
+        self._set_cursor = self._bind(user32.SetCursorPos, w.BOOL, c.c_int, c.c_int)
         self._window_at = self._bind(user32.WindowFromPoint, w.HWND, w.POINT)
         self._ancestor = self._bind(user32.GetAncestor, w.HWND, w.HWND, w.UINT)
         self._window_thread = self._bind(
@@ -163,11 +164,24 @@ class WindowsDesktop:
         return state == "exists"
 
     def cursor_over(self, target: WindowTarget) -> bool:
+        try:
+            return self.point_over(target, self.mouse_position())
+        except OSError:
+            return False
+
+    def mouse_position(self) -> tuple[int, int]:
         point = w.POINT()
         if not self._cursor(c.byref(point)):
-            return False
-        hwnd = self._window_at(point)
+            raise c.WinError(c.get_last_error())
+        return point.x, point.y
+
+    def point_over(self, target: WindowTarget, position: tuple[int, int]) -> bool:
+        hwnd = self._window_at(w.POINT(*position))
         return bool(hwnd and (hwnd == target.hwnd or self._ancestor(hwnd, 2) == target.hwnd))
+
+    def send_mouse_move(self, position: tuple[int, int]) -> None:
+        if not self._set_cursor(*position):
+            raise c.WinError(c.get_last_error())
 
     @contextmanager
     def hotkeys(self, mapping: dict[int, str]):

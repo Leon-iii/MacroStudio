@@ -27,12 +27,15 @@ class InputBackend(Protocol):
     def send_mouse_down(self, button: str) -> None: ...
 
     def send_mouse_up(self, button: str) -> None: ...
+    def mouse_position(self) -> tuple[int, int]: ...
+    def send_mouse_move(self, position: tuple[int, int]) -> None: ...
 
 
 @dataclass
 class FakeInputBackend:
     clock: Clock
     events: list[dict[str, int | str]] = field(default_factory=list, init=False)
+    cursor: tuple[int, int] = field(default=(0, 0), init=False)
 
     def send_key_down(self, key: str) -> None:
         self.events.append({"time_ns": self.clock.now_ns, "action": "key_down", "key": key})
@@ -45,3 +48,10 @@ class FakeInputBackend:
 
     def send_mouse_up(self, button: str) -> None:
         self.events.append({"time_ns": self.clock.now_ns, "action": "mouse_up", "button": button})
+
+    def mouse_position(self) -> tuple[int, int]:
+        return self.cursor
+
+    def send_mouse_move(self, position: tuple[int, int]) -> None:
+        self.cursor = position
+        self.events.append({"time_ns": self.clock.now_ns, "action": "mouse_move", "x": position[0], "y": position[1]})

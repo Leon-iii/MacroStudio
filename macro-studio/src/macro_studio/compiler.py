@@ -34,22 +34,30 @@ def compile_project(project):
             return {"var": field(value, "NAME")}
         if kind == "parameter":
             return {"var": PARAM_PREFIX + field(value, "NAME")}
-        if kind == "binary":
+        if kind in ("binary", "arithmetic", "comparison", "logical"):
+            default = False if kind == "logical" else 0
             return {"op": field(value, "OP"), "args": [
-                expression(value, "A", 0), expression(value, "B", 0),
+                expression(value, "A", default), expression(value, "B", default),
             ]}
         if kind == "not":
             return {"op": "not", "args": [expression(value, "VALUE", False)]}
         if kind == "target_window":
             return {"op": kind, "state": field(value, "STATE")}
         if kind in SCREEN_SENSOR_OPS:
-            sensor = {"op": kind, "block_id": value["id"], "x": field(value, "X"), "y": field(value, "Y")}
+            position = position_value(value) if child(value, "POSITION") else {"x": field(value, "X"), "y": field(value, "Y")}
+            sensor = {"op": kind, "block_id": value["id"], **position}
             if kind == "pixel_color":
                 return dict(sensor, color=field(value, "COLOR"))
-            sensor.update(width=field(value, "WIDTH"), height=field(value, "HEIGHT"))
+            sensor.update(width=expression(value, "WIDTH", field(value, "WIDTH")),
+                          height=expression(value, "HEIGHT", field(value, "HEIGHT")))
             if kind == "region_text":
                 return dict(sensor, text=field(value, "TEXT"), language=field(value, "LANGUAGE"))
-            return dict(sensor, image=field(value, "IMAGE"))
+            image = field(value, "IMAGE")
+            if not image:
+                fail(value, "기준 이미지를 선택하세요.")
+            if isinstance(image, str) and image.startswith("asset:") and image not in project.get("image_assets", {}):
+                fail(value, "프로젝트에 등록된 기준 이미지를 다시 선택하세요.")
+            return dict(sensor, image=image)
         fail(value, "지원하지 않는 값 블록입니다.")
 
     def chain(block, kind):
@@ -58,6 +66,43 @@ def compile_project(project):
                 fail(block, "이 위치에 연결할 수 없는 블록입니다.")
             yield block
             block = block.get("next", {}).get("block")
+
+    def duration_value(block):
+        duration = child(block, "DURATION")
+        if not duration or duration["type"] != "ms_duration":
+            fail(block, "시간 값 블록을 연결하세요.")
+        if not child(duration, "VALUE"):
+            fail(duration, "시간 값에 숫자나 연산 블록을 연결하세요.")
+        return {"value": expression(duration, "VALUE", None), "unit": field(duration, "UNIT")}
+
+    def hold_time(block):
+        milliseconds = field(block, "MS")
+        if child(block, "DURATION") or milliseconds is None:
+            return {"duration": duration_value(block)}
+        return {"hold_ns": round(milliseconds * 1_000_000)}
+
+    def position_value(block):
+        position = child(block, "POSITION")
+        if not position or position["type"] != "ms_position":
+            fail(block, "좌표 블록을 연결하세요.")
+        return {axis.lower(): expression(position, axis, field(position, axis)) for axis in ("X", "Y")}
+
+    def keyboard_value(block, *, hotkey=False):
+        selected = child(block, "KEY")
+        if selected and selected["type"] != "ms_key":
+            fail(block, "키 블록을 연결하세요.")
+        value = field(selected, "VALUE") if selected else field(block, "KEY")
+        if not value:
+            fail(block, "키 블록을 연결하고 키를 지정하세요.")
+        try:
+            key = normalize_hotkey(value)
+        except ValidationError as error:
+            fail(block, str(error))
+        if hotkey and selected and "+" not in key:
+            fail(block, "단축키에는 Ctrl, Alt, Shift, Win 중 하나 이상이 필요합니다.")
+        if not hotkey and "+" in key:
+            fail(block, "키 누르기와 연타에는 단일 키를 연결하세요.")
+        return key
 
     def steps(block):
         result = []
@@ -70,21 +115,20 @@ def compile_project(project):
                 case "wait":
                     step["duration_ns"] = round(field(block, "MS") * 1_000_000)
                 case "wait_time":
-                    duration = child(block, "DURATION")
-                    if not duration or duration["type"] != "ms_duration":
-                        fail(block, "기다릴 시간 블록을 연결하세요.")
-                    if not child(duration, "VALUE"):
-                        fail(duration, "시간 값에 숫자나 연산 블록을 연결하세요.")
-                    step.update(op="wait", duration={"value": expression(duration, "VALUE", None),
-                                                     "unit": field(duration, "UNIT")})
+                    step.update(op="wait", duration=duration_value(block))
                 case "emit_event":
                     step["name"] = field(block, "NAME")
                 case "mouse_click":
-                    step.update(button=field(block, "BUTTON"), hold_ns=round(field(block, "MS") * 1_000_000))
+                    step.update(button=field(block, "BUTTON"), **hold_time(block))
+                case "mouse_click_at":
+                    step.update(position=position_value(block), button=field(block, "BUTTON"), hold_ns=50_000_000)
+                case "mouse_move":
+                    step.update(position=position_value(block), duration=duration_value(block))
                 case "key_tap" | "tap_sequence":
-                    step.update(key=field(block, "KEY"), hold_ns=round(field(block, "MS") * 1_000_000))
+                    step.update(key=keyboard_value(block), **hold_time(block))
                     if kind == "tap_sequence":
-                        step.update(frequency_hz=field(block, "HZ"), count=field(block, "COUNT"))
+                        step.update(frequency_hz=expression(block, "HZ", field(block, "HZ")),
+                                    count=expression(block, "COUNT", field(block, "COUNT")))
                 case "repeat" | "forever" | "while":
                     step["steps"] = steps(child(block, "BODY"))
                     if kind == "repeat":
@@ -144,10 +188,7 @@ def compile_project(project):
             workflows[name] = {"steps": steps(child(block, "BODY"))}
             event = {"type": "project_start"}
             if kind == "ms_hotkey":
-                try:
-                    key = normalize_hotkey(field(block, "KEY"))
-                except ValidationError as error:
-                    fail(block, str(error))
+                key = keyboard_value(block, hotkey=True)
                 event = {"type": "hotkey_pressed", "hotkey": key}
             elif kind == "ms_interval":
                 milliseconds = field(block, "MS")
@@ -176,7 +217,7 @@ def compile_project(project):
             transition = {"from": field(block, "FROM"), "to": field(block, "TO"),
                           "block_id": block["id"]}
             if kind == "ms_state_hotkey":
-                transition["hotkey"] = field(block, "KEY")
+                transition["hotkey"] = keyboard_value(block, hotkey=True)
             if child(block, "GUARD"):
                 transition["guard"] = expression(block, "GUARD", False)
             transitions.append(transition)
