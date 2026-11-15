@@ -1,0 +1,33 @@
+{
+  "ir_version": 1,
+  "project_id": "mixed-demo",
+  "globals": {"enabled": true, "runs": 0},
+  "workflows": {
+    "startup": {
+      "steps": [{
+        "op": "if",
+        "block_id": "enabled-check",
+        "condition": {"var": "enabled"},
+        "then": [{
+          "op": "repeat",
+          "block_id": "startup-repeat",
+          "count": 2,
+          "steps": [
+            {"op": "call", "block_id": "startup-call", "workflow_id": "tap_a"},
+            {"op": "wait", "block_id": "startup-wait", "duration_ns": 10000000}
+          ]
+        }]
+      }]
+    },
+    "tap_a": {
+      "steps": [
+        {"op": "set", "block_id": "increment", "var": "runs", "value": {"op": "add", "args": [{"var": "runs"}, 1]}},
+        {"op": "key_tap", "block_id": "tap", "key": "A", "hold_ns": 2000000}
+      ]
+    }
+  },
+  "handlers": [
+    {"id": "start", "event": {"type": "project_start"}, "workflow_id": "startup"},
+    {"id": "hotkey", "event": {"type": "hotkey_pressed", "hotkey": "F7"}, "workflow_id": "tap_a"}
+  ]
+}

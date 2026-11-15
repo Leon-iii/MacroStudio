@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "project_id": "mixed-loop",
+  "name": "mixed-loop",
+  "globals": {},
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": [
+        {
+          "type": "ms_start",
+          "id": "mixed-start",
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_call",
+                "id": "startup-call",
+                "fields": {
+                  "NAME": "B 누르기"
+                },
+                "next": {
+                  "block": {
+                    "type": "ms_forever",
+                    "id": "loop",
+                    "inputs": {
+                      "BODY": {
+                        "block": {
+                          "type": "ms_key_tap",
+                          "id": "auto-a",
+                          "fields": {
+                            "KEY": "A",
+                            "MS": 80
+                          },
+                          "next": {
+                            "block": {
+                              "type": "ms_wait",
+                              "id": "auto-wait",
+                              "fields": {
+                                "MS": 120
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 64
+        },
+        {
+          "type": "ms_hotkey",
+          "id": "mixed-hotkey",
+          "fields": {
+            "KEY": "CTRL+F7",
+            "POLICY": "ignore_if_running"
+          },
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_call",
+                "id": "hotkey-call",
+                "fields": {
+                  "NAME": "B 누르기"
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 300
+        },
+        {
+          "type": "ms_workflow",
+          "id": "shared",
+          "fields": {
+            "NAME": "B 누르기"
+          },
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_key_tap",
+                "id": "shared-b",
+                "fields": {
+                  "KEY": "B",
+                  "MS": 50
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 536
+        }
+      ]
+    }
+  }
+}

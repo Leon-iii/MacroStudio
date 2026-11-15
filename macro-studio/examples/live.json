@@ -1,0 +1,12 @@
+{
+  "ir_version": 1,
+  "project_id": "windows-input-demo",
+  "workflows": {
+    "tap": {"steps": [{"op": "key_tap", "block_id": "tap-a", "key": "A", "hold_ns": 50000000}]}
+  },
+  "handlers": [{
+    "id": "react",
+    "event": {"type": "hotkey_pressed", "hotkey": "CTRL+F7"},
+    "workflow_id": "tap"
+  }]
+}

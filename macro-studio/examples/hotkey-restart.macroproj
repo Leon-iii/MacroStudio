@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "project_id": "hotkey-restart",
+  "name": "hotkey-restart",
+  "globals": {},
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": [
+        {
+          "type": "ms_hotkey",
+          "id": "restart-hotkey",
+          "fields": {
+            "KEY": "CTRL+F7",
+            "POLICY": "restart"
+          },
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_key_tap",
+                "id": "restart-c",
+                "fields": {
+                  "KEY": "C",
+                  "MS": 3000
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 64
+        }
+      ]
+    }
+  }
+}

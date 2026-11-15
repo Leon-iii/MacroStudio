@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "project_id": "key-collision",
+  "name": "key-collision",
+  "globals": {},
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": [
+        {
+          "type": "ms_start",
+          "id": "owner-start",
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_key_tap",
+                "id": "owner-a",
+                "fields": {
+                  "KEY": "A",
+                  "MS": 3000
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 64
+        },
+        {
+          "type": "ms_hotkey",
+          "id": "collision-hotkey",
+          "fields": {
+            "KEY": "CTRL+F7",
+            "POLICY": "ignore_if_running"
+          },
+          "inputs": {
+            "BODY": {
+              "block": {
+                "type": "ms_key_tap",
+                "id": "conflicting-a",
+                "fields": {
+                  "KEY": "A",
+                  "MS": 70
+                }
+              }
+            }
+          },
+          "x": 72,
+          "y": 300
+        }
+      ]
+    }
+  }
+}
