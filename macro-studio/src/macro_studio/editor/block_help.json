@@ -82,6 +82,19 @@
     "details": ["시간은 밀리초입니다. 1000 ms는 1초입니다."],
     "example": "A 키 누르기 → 500 ms 기다리기 → B 키 누르기"
   },
+  "ms_wait_time": {
+    "title": "만큼 기다리기",
+    "summary": "연결된 시간 값만큼 현재 작업을 기다립니다.",
+    "details": ["기다리기 시작할 때 시간 값을 계산합니다. 0부터 24시간까지 지정할 수 있습니다."],
+    "related": ["ms_duration"]
+  },
+  "ms_duration": {
+    "title": "시간 값",
+    "summary": "숫자와 단위를 묶어 대기 시간을 지정합니다.",
+    "details": ["숫자, 숫자 변수 또는 숫자를 반환하는 연산을 연결합니다. ms는 밀리초, sec는 초, min은 분입니다."],
+    "example": "1 ÷ 2를 연결하고 sec 선택 → 0.5초",
+    "related": ["ms_wait_time", "ms_number", "ms_binary"]
+  },
   "ms_repeat": {
     "title": "횟수 반복",
     "summary": "안에 연결한 블록을 지정한 횟수만큼 순서대로 실행합니다.",
@@ -91,10 +104,34 @@
   },
   "ms_forever": {
     "title": "계속 반복",
-    "summary": "현재 작업이 끝날 때까지 안에 연결한 블록을 반복합니다.",
-    "details": ["반복을 종료하려면 반복 안에서 '이 작업 종료'를 실행하거나 프로젝트를 정지합니다."],
+    "summary": "안에 연결한 블록을 계속 반복합니다.",
+    "details": ["'반복 탈출'을 실행하면 반복을 끝내고 아래 블록으로 이동합니다."],
     "example": "계속 반복 안에서 → 픽셀 색상이 일치하면 이 작업 종료 → 100 ms 기다리기",
-    "related": ["ms_end", "ms_pixel_color", "ms_wait"]
+    "related": ["ms_break", "ms_end", "ms_pixel_color", "ms_wait"]
+  },
+  "ms_while": {
+    "title": "조건 반복",
+    "summary": "조건이 참인 동안 안에 연결한 블록을 반복합니다.",
+    "details": ["첫 실행 전과 각 반복 전에 조건을 확인합니다. 조건을 비우면 거짓으로 처리합니다."],
+    "related": ["ms_repeat", "ms_break", "ms_continue"]
+  },
+  "ms_if_only": {
+    "title": "만약",
+    "summary": "조건이 참이면 안에 연결한 블록을 한 번 실행합니다.",
+    "details": ["조건이 거짓이거나 비어 있으면 아래 블록으로 넘어갑니다."],
+    "related": ["ms_if", "ms_boolean"]
+  },
+  "ms_break": {
+    "title": "반복 탈출",
+    "summary": "가장 가까운 반복을 끝내고 그 아래 블록부터 실행합니다.",
+    "details": ["반복 블록 안에 연결합니다. 반복이 중첩되어 있으면 안쪽 반복에만 적용됩니다."],
+    "related": ["ms_continue", "ms_while"]
+  },
+  "ms_continue": {
+    "title": "다음 반복",
+    "summary": "현재 반복에서 남은 블록을 건너뛰고 다음 회차로 넘어갑니다.",
+    "details": ["조건 반복에서는 조건을 다시 확인합니다. 반복이 중첩되어 있으면 안쪽 반복에만 적용됩니다."],
+    "related": ["ms_break", "ms_while"]
   },
   "ms_if": {
     "title": "만약",

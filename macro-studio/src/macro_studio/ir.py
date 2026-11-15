@@ -5,6 +5,7 @@ import re
 MAX_REPEAT_COUNT = 1_000_000
 MAX_CALL_DEPTH = 32
 MAX_DURATION_NS = 86_400_000_000_000
+DURATION_UNIT_NS = {"ms": 1_000_000, "sec": 1_000_000_000, "min": 60_000_000_000}
 DEFAULT_STOP_HOTKEY = "CTRL+ALT+SHIFT+F11"
 SCREEN_SENSOR_OPS = ("pixel_color", "region_image", "region_text")
 OCR_LANGUAGES = ("eng", "kor", "kor+eng")
@@ -176,7 +177,7 @@ def _require_type(expression, variables, expected, path):
         raise ValidationError(f"{path}: incompatible expression type")
 
 
-def _steps(raw, workflows, variables, path, depth=0, return_type=None):
+def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loop=False):
     if depth > 32:
         raise ValidationError(f"{path}: block nesting exceeds 32")
     result = []
@@ -188,7 +189,14 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None):
             location = f"{location} ({block_id})"
         op = step.get("op")
         if op == "wait":
-            _integer(step.get("duration_ns"), 0, MAX_DURATION_NS, location)
+            if "duration" in step:
+                duration = _object(step["duration"], location)
+                unit = duration.get("unit")
+                if "duration_ns" in step or not isinstance(unit, str) or unit not in DURATION_UNIT_NS:
+                    raise ValidationError(f"{location}: expected one duration with unit ms, sec or min")
+                _require_type(duration.get("value"), variables, int, location)
+            else:
+                _integer(step.get("duration_ns"), 0, MAX_DURATION_NS, location)
         elif op == "emit_event":
             step["name"] = _event_name(step.get("name"), location)
         elif op == "mouse_click":
@@ -205,19 +213,23 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None):
                     raise ValidationError(f"{location}: hold must be shorter than the period")
                 if step.get("missed_tick_policy", "skip_missed") != "skip_missed":
                     raise ValidationError(f"{location}: unsupported missed tick policy")
-        elif op in ("repeat", "forever"):
+        elif op in ("repeat", "forever", "while"):
             if op == "repeat":
                 count = step.get("count")
                 if isinstance(count, dict):
                     _require_type(count, variables, int, location)
                 else:
                     _integer(count, 0, MAX_REPEAT_COUNT, location)
-            step["steps"] = _steps(step.get("steps"), workflows, variables, location, depth + 1, return_type)
+            elif op == "while":
+                _require_type(step.get("condition"), variables, bool, location)
+            step["steps"] = _steps(step.get("steps"), workflows, variables, location,
+                                   depth + 1, return_type, in_loop=True)
         elif op == "if":
             _require_type(step.get("condition"), variables, bool, location)
             for branch in ("then", "else"):
                 raw_branch = step.get("else", []) if branch == "else" else step.get("then")
-                step[branch] = _steps(raw_branch, workflows, variables, location, depth + 1, return_type)
+                step[branch] = _steps(raw_branch, workflows, variables, location,
+                                      depth + 1, return_type, in_loop=in_loop)
         elif op == "set":
             name = _name(step.get("var"), location)
             if name not in variables or name.startswith(PARAM_PREFIX):
@@ -244,11 +256,14 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None):
                     raise ValidationError(f"{location}: branching requires a boolean return value")
                 for branch in ("then", "else"):
                     step[branch] = _steps(step.get(branch, []), workflows, variables, location,
-                                          depth + 1, return_type)
+                                          depth + 1, return_type, in_loop=in_loop)
         elif op == "return":
             if return_type is None:
                 raise ValidationError(f"{location}: this workflow has no return type")
             _require_type(step.get("value"), variables, VALUE_TYPES[return_type], location)
+        elif op in ("break", "continue"):
+            if not in_loop:
+                raise ValidationError(f"{location}: {op} requires an enclosing loop")
         elif op != "end":
             raise ValidationError(f"{location}: unsupported opcode {op!r}")
         result.append(step)

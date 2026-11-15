@@ -7,3 +7,5 @@ body { background: #e9edf2; color: #182637; font: 14px "Malgun Gothic", sans-ser
 .blocklyScrollbarHandle { fill: #8393a6; }
 .blocklyHighlightedConnectionPath { stroke: #315de0; }
 .msBreakpoint > .blocklyPath { stroke: #b62b43; stroke-width: 3px; }
+.msBlockHeader { pointer-events: none; }
+.msBlockHeader text { fill: #fff; font: 600 13px "Malgun Gothic", sans-serif; }

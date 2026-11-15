@@ -16,7 +16,8 @@ def compile_project(project):
         return block.get("fields", {}).get(name)
 
     def child(block, name):
-        return block.get("inputs", {}).get(name, {}).get("block")
+        connection = block.get("inputs", {}).get(name, {})
+        return connection.get("block") or connection.get("shadow")
 
     def expression(block, name, fallback):
         value = child(block, name)
@@ -68,6 +69,14 @@ def compile_project(project):
             match kind:
                 case "wait":
                     step["duration_ns"] = round(field(block, "MS") * 1_000_000)
+                case "wait_time":
+                    duration = child(block, "DURATION")
+                    if not duration or duration["type"] != "ms_duration":
+                        fail(block, "기다릴 시간 블록을 연결하세요.")
+                    if not child(duration, "VALUE"):
+                        fail(duration, "시간 값에 숫자나 연산 블록을 연결하세요.")
+                    step.update(op="wait", duration={"value": expression(duration, "VALUE", None),
+                                                     "unit": field(duration, "UNIT")})
                 case "emit_event":
                     step["name"] = field(block, "NAME")
                 case "mouse_click":
@@ -76,14 +85,17 @@ def compile_project(project):
                     step.update(key=field(block, "KEY"), hold_ns=round(field(block, "MS") * 1_000_000))
                     if kind == "tap_sequence":
                         step.update(frequency_hz=field(block, "HZ"), count=field(block, "COUNT"))
-                case "repeat" | "forever":
+                case "repeat" | "forever" | "while":
                     step["steps"] = steps(child(block, "BODY"))
                     if kind == "repeat":
                         step["count"] = expression(block, "COUNT", 1)
-                case "if":
-                    step.update(condition=expression(block, "CONDITION", False),
+                    elif kind == "while":
+                        step["condition"] = expression(block, "CONDITION", False)
+                case "if" | "if_only":
+                    step.update(op="if", condition=expression(block, "CONDITION", False),
                                 then=steps(child(block, "THEN")))
-                    step["else"] = steps(child(block, "ELSE"))
+                    if kind == "if":
+                        step["else"] = steps(child(block, "ELSE"))
                 case "set":
                     step.update(var=field(block, "NAME"), value=expression(block, "VALUE", 0))
                 case "call" | "call_store" | "call_if":
@@ -105,7 +117,7 @@ def compile_project(project):
                     if not child(block, "VALUE"):
                         fail(block, "반환할 값을 연결하세요.")
                     step["value"] = expression(block, "VALUE", None)
-                case "end":
+                case "end" | "break" | "continue":
                     pass
                 case _:
                     fail(block, "실행 블록을 이벤트나 워크플로 안에 연결하세요.")

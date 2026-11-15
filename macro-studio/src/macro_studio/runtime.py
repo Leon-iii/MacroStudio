@@ -2,10 +2,10 @@ from collections import ChainMap, deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from heapq import heapify, heappop, heappush
-from itertools import count
+from itertools import count, takewhile
 
 from .backend import Clock, InputBackend
-from .ir import MAX_CALL_DEPTH, MAX_REPEAT_COUNT, PARAM_PREFIX, evaluate
+from .ir import DURATION_UNIT_NS, MAX_CALL_DEPTH, MAX_DURATION_NS, MAX_REPEAT_COUNT, PARAM_PREFIX, evaluate
 
 
 MAX_ACTIVE_TASKS = 256
@@ -46,6 +46,7 @@ class Frame:
     loop_block_id: str | None = None
     commands: Iterator[dict] = field(default_factory=lambda: iter(()))
     caller: dict | None = None
+    is_loop: bool = False
 
     @classmethod
     def once(cls, steps: list[dict], *, workflow: bool = False) -> "Frame":
@@ -385,7 +386,15 @@ class Runtime:
             scope = scopes[-1]
             match step["op"]:
                 case "wait":
-                    yield self.clock.now_ns + step["duration_ns"]
+                    duration_ns = step.get("duration_ns")
+                    if "duration" in step:
+                        duration = step["duration"]
+                        value = self._evaluate(duration["value"], scope)
+                        unit_ns = DURATION_UNIT_NS[duration["unit"]]
+                        if not 0 <= value <= MAX_DURATION_NS // unit_ns:
+                            raise TaskFault("wait_duration", "wait duration must be between 0 and 24 hours")
+                        duration_ns = round(value * unit_ns)
+                    yield self.clock.now_ns + duration_ns
                 case "emit_event":
                     if len(self._custom_events) >= MAX_CUSTOM_EVENTS:
                         raise TaskFault("event_queue_limit", "custom event queue limit reached")
@@ -396,8 +405,15 @@ class Runtime:
                     condition = self._evaluate(step["condition"], scope)
                     branch = step["then"] if condition else step.get("else", [])
                     frames.append(Frame.once(branch))
-                case "repeat" | "forever":
+                case "repeat" | "forever" | "while":
                     frames.append(self._loop_frame(step, scope))
+                case "break" | "continue":
+                    while not frames[-1].is_loop:
+                        frames.pop()
+                    if step["op"] == "break":
+                        frames.pop()
+                    else:
+                        frames[-1].commands = iter(())
                 case "call":
                     if len(scopes) >= MAX_CALL_DEPTH:
                         raise TaskFault("call_depth", "workflow call depth exceeded")
@@ -434,13 +450,15 @@ class Runtime:
     def _loop_frame(self, step: dict, parameters: dict) -> Frame:
         if step["op"] == "forever":
             iterations = count()
+        elif step["op"] == "while":
+            iterations = takewhile(lambda _: self._evaluate(step["condition"], parameters), count())
         else:
             repeats = self._evaluate(step["count"], parameters)
             if type(repeats) is not int or not 0 <= repeats <= MAX_REPEAT_COUNT:
                 raise TaskFault("repeat_count", "repeat count must be an integer within the allowed range")
             iterations = iter(range(repeats))
 
-        return Frame(step["steps"], iterations, loop_block_id=step.get("block_id"))
+        return Frame(step["steps"], iterations, loop_block_id=step.get("block_id"), is_loop=True)
 
     def _tap_sequence(self, task: Task, step: dict) -> Iterator[int]:
         origin = self.clock.now_ns

@@ -16,8 +16,19 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class MacroStudioTestWindow {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point { public int X; public int Y; }
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(IntPtr window, ref Point point);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    public static bool Click(IntPtr window, int x, int y) {
+        Point point = new Point { X = x, Y = y };
+        if (!ScreenToClient(window, ref point)) return false;
+        IntPtr coordinates = new IntPtr((point.Y << 16) | (point.X & 0xffff));
+        return PostMessage(window, 0x0201, new IntPtr(1), coordinates)
+            && PostMessage(window, 0x0202, IntPtr.Zero, coordinates);
+    }
 }
 '@
 $findChildren = [Windows.Automation.TreeScope]::Children
@@ -49,26 +60,57 @@ function Button($Window, $Name) {
     $Window.FindFirst($findDescendants, $condition)
 }
 
+function Invoke-FileAction($Name) {
+    Click-Element (Named $window "파일")
+    $action = Wait-For "file menu action $Name" {
+        $item = Named $window $Name
+        if (-not $item) {
+            $popup = $root.FindAll($findChildren, $pidCondition)
+            foreach ($candidate in $popup) {
+                $item = Named $candidate $Name
+                if ($item) { break }
+            }
+        }
+        $item
+    }
+    Click-Element $action
+}
+
+function Click-Element($Element) {
+    $bounds = $Element.Current.BoundingRectangle
+    $owner = $Element
+    while ($owner -and -not $owner.Current.NativeWindowHandle) {
+        $owner = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($owner)
+    }
+    if (-not $owner -or $owner.Current.ProcessId -ne $app.Id -or
+        -not [MacroStudioTestWindow]::Click([IntPtr]$owner.Current.NativeWindowHandle,
+            [int]($bounds.X + $bounds.Width / 2), [int]($bounds.Y + $bounds.Height / 2))) {
+        throw "Cannot click the file menu control."
+    }
+}
+
 function Enter-Path($Title, $Path) {
     $dialog = Wait-For $Title {
         $child = Named $window $Title
         if ($child) { $child } else { Named $root $Title $findChildren }
     }
-    $all = $dialog.FindAll($findDescendants, [Windows.Automation.Condition]::TrueCondition)
-    $accept = $all | Where-Object {
-        $_.Current.AutomationId -eq "1" -and $_.Current.Name -match '^(열기|저장|Open|Save)'
-    } | Select-Object -First 1
-    $value = $null
-    foreach ($control in $all) {
-        if ($control.Current.ControlType.Id -eq [Windows.Automation.ControlType]::Edit.Id -and
-            $control.Current.Name -match '파일 이름|File name' -and
-            $control.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
-            break
+    $controls = Wait-For "file dialog controls" {
+        $all = $dialog.FindAll($findDescendants, [Windows.Automation.Condition]::TrueCondition)
+        $accept = $all | Where-Object {
+            $_.Current.AutomationId -eq "1" -and $_.Current.Name -match '^(열기|저장|Open|Save)'
+        } | Select-Object -First 1
+        $value = $null
+        foreach ($control in $all) {
+            if ($control.Current.ControlType.Id -eq [Windows.Automation.ControlType]::Edit.Id -and
+                $control.Current.Name -match '파일 이름|File name' -and
+                $control.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
+                break
+            }
         }
+        if ($value -and $accept) { @{ Value = $value; Accept = $accept } }
     }
-    if (-not $value -or -not $accept) { throw "Cannot find the file dialog controls." }
-    $value.SetValue($Path)
-    if (-not [MacroStudioTestWindow]::PostMessage([IntPtr]$accept.Current.NativeWindowHandle,
+    $controls.Value.SetValue($Path)
+    if (-not [MacroStudioTestWindow]::PostMessage([IntPtr]$controls.Accept.Current.NativeWindowHandle,
                                                 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) {
         throw "Cannot submit the file dialog."
     }
@@ -96,11 +138,11 @@ try {
         $verify = Named $window "검증"
         if ($verify -and $verify.Current.IsEnabled) { $true }
     } | Out-Null
-    (Button $window "열기…").GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Invoke-FileAction "열기…"
     Enter-Path "프로젝트 열기" $original
     Wait-For "opened project" { $window.Current.Name -like "mixed-loop*Macro Studio" } | Out-Null
 
-    (Button $window "저장").GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Invoke-FileAction "저장"
     Wait-For "saved project" { $window.Current.Name -like "original*Macro Studio" } | Out-Null
     $saved = Get-Content -Raw -Encoding utf8 -LiteralPath $original | ConvertFrom-Json
     if ($saved.name -ne "original" -or $saved.workspace.blocks.blocks.Count -lt 2) {
@@ -137,7 +179,7 @@ try {
     } | Out-Null
     $stop = Button $window "정지"
     $stop.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-    Wait-For "Runner stop" { -not (Button $window "정지").Current.IsEnabled } | Out-Null
+    Wait-For "Runner stop" { (Button $window "시작").Current.IsEnabled } | Out-Null
     "PASS: packaged editor, open/save and separate dry-run Runner"
 }
 finally {

@@ -4,12 +4,14 @@ import re
 import sys
 from uuid import uuid4
 
-from PySide6.QtCore import QIODevice, QObject, QProcess, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QByteArray, QIODevice, QObject, QProcess, QSize, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngineUrlRequestInterceptor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -28,7 +30,7 @@ QMainWindow, QMenuBar { background: #f6f8fb; }
 QMenuBar { padding: 3px 12px; }
 QMenuBar::item:selected, QMenu::item:selected { background: #e1e9f5; }
 QWidget#toolbar { background: #fff; border-top: 1px solid #d8e0ea; border-bottom: 1px solid #cbd5e1; }
-QWidget#toolbar QLabel { background: transparent; }
+QWidget#toolbarIdentity, QWidget#toolbar QLabel#title { background: transparent; }
 QLabel#title { font-size: 21px; font-weight: 700; }
 QLabel#section { font-size: 15px; font-weight: 700; }
 QLabel#muted { color: #475b74; }
@@ -37,14 +39,43 @@ QLabel#mode[armed="true"] { color: #733c0d; background: #f8ead4; }
 QPushButton, QComboBox, QLineEdit { background: #fff; border: 1px solid #b9c7d7; border-radius: 5px; padding: 6px 10px; min-height: 24px; }
 QPushButton:hover { background: #eef3fa; }
 QPushButton:focus, QLineEdit:focus, QComboBox:focus { border: 2px solid #2455cb; padding: 5px 9px; }
-QPushButton#primary { background: #234fbf; color: #fff; border-color: #234fbf; font-weight: 700; }
-QPushButton#primary:hover { background: #1a429f; }
-QPushButton#stop { color: #962e31; border-color: #d7a8aa; }
-QPushButton:disabled, QPushButton#primary:disabled, QPushButton#stop:disabled { color: #576b82; background: #e8edf3; border-color: #d0d9e4; }
+QPushButton[transportIcon="true"] { padding: 0; min-height: 0; border-radius: 7px; }
+QPushButton#transport { background: #234fbf; border-color: #234fbf; }
+QPushButton#transport:hover { background: #1a429f; }
+QPushButton#transport[stopping="true"] { background: #a12e38; border-color: #a12e38; }
+QPushButton#transport[stopping="true"]:hover { background: #86232c; }
+QPushButton#arm[armed="true"] { background: #f8ead4; border-color: #ce9f61; }
+QPushButton[transportIcon="true"]:focus { border: 2px solid #4877e4; }
+QPushButton:disabled, QPushButton#transport:disabled { color: #576b82; background: #e8edf3; border-color: #d0d9e4; }
 QWidget#inspector { border-left: 1px solid #cbd5e1; }
 QPlainTextEdit { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; padding: 6px; }
 QLabel#footer { color: #435670; padding: 6px 15px; border-top: 1px solid #cbd5e1; }
 """
+SHIELD = '<path d="M12 3.2 19 6v5.5c0 4-2.8 7-7 9.3-4.2-2.3-7-5.3-7-9.3V6Z"/>'
+TRANSPORT_ICONS = {
+    "arm": (SHIELD, "#274775"),
+    "armed": (SHIELD + '<path d="m8.6 11.8 2.2 2.2 4.5-4.5"/>', "#733c0d"),
+    "play": ('<path d="M8 4.5 20 12 8 19.5Z" fill="currentColor" stroke="none"/>', "#fff"),
+    "stop": ('<rect x="6" y="6" width="12" height="12" rx="1.4" fill="currentColor" stroke="none"/>', "#fff"),
+    "pause": ('<path d="M9 5.5v13M15 5.5v13" stroke-width="2.8"/>', "#274775"),
+    "resume": ('<path d="M8 4.5 20 12 8 19.5Z" fill="currentColor" stroke="none"/>', "#274775"),
+}
+
+
+def transport_icon(shape, color):
+    source = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+              f'<g fill="none" stroke="{color}" stroke-width="1.9" stroke-linecap="round" '
+              f'stroke-linejoin="round">{shape.replace("currentColor", color)}</g></svg>')
+    renderer = QSvgRenderer(QByteArray(source.encode("ascii")))
+    icon = QIcon()
+    for size in (20, 30, 40, 60):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 class Bridge(QObject):
@@ -88,10 +119,10 @@ def new_project(example=False):
             {"type": "ms_start", "id": "example-start", "x": 72, "y": 70, "inputs": {
                 "BODY": {"block": {"type": "ms_call", "id": "example-start-call", "fields": {"NAME": "A 누르기"}}},
             }},
-            {"type": "ms_hotkey", "id": "example-hotkey", "x": 72, "y": 244, "fields": {"KEY": "CTRL+F7"}, "inputs": {
+            {"type": "ms_hotkey", "id": "example-hotkey", "x": 72, "y": 318, "fields": {"KEY": "CTRL+F7"}, "inputs": {
                 "BODY": {"block": {"type": "ms_call", "id": "example-key-call", "fields": {"NAME": "A 누르기"}}},
             }},
-            {"type": "ms_workflow", "id": "example-workflow", "x": 72, "y": 418, "fields": {"NAME": "A 누르기"}, "inputs": {
+            {"type": "ms_workflow", "id": "example-workflow", "x": 72, "y": 566, "fields": {"NAME": "A 누르기"}, "inputs": {
                 "BODY": {"block": {"type": "ms_key_tap", "id": "example-tap", "fields": {"KEY": "A", "MS": 50}}},
             }},
         ]
@@ -145,23 +176,29 @@ class Studio(QMainWindow):
         self.setCentralWidget(root)
 
         toolbar = QWidget(objectName="toolbar")
-        row = QHBoxLayout(toolbar)
-        row.setContentsMargins(18, 12, 16, 12)
-        row.setSpacing(9)
-        row.addWidget(QLabel("Macro Studio", objectName="title"))
+        row = QGridLayout(toolbar)
+        row.setContentsMargins(18, 10, 18, 10)
+        row.setHorizontalSpacing(12)
+        row.setColumnStretch(0, 1)
+        row.setColumnStretch(2, 1)
+        identity = QWidget(objectName="toolbarIdentity")
+        identity_row = QHBoxLayout(identity)
+        identity_row.setContentsMargins(0, 0, 0, 0)
+        identity_row.addWidget(QLabel("Macro Studio", objectName="title"))
         self.mode = QLabel(objectName="mode")
-        row.addWidget(self.mode)
-        row.addStretch()
-        for title, action in (("새로 만들기", self.create), ("열기…", self.open), ("저장", self.save)):
-            row.addWidget(self.button(title, action))
+        identity_row.addWidget(self.mode)
+        row.addWidget(identity, 0, 0, Qt.AlignmentFlag.AlignLeft)
         self.verify_button = self.button("검증", self.verify)
-        row.addWidget(self.verify_button)
-        self.arm_button = self.button("ARM 설정", self.toggle_arm)
-        row.addWidget(self.arm_button)
-        self.start_button = self.button("시작", self.start, "primary")
-        row.addWidget(self.start_button)
-        self.stop_button = self.button("정지", lambda: self.send("stop"), "stop")
-        row.addWidget(self.stop_button)
+        row.addWidget(self.verify_button, 0, 2, Qt.AlignmentFlag.AlignRight)
+        self.transport_icons = {name: transport_icon(*shape) for name, shape in TRANSPORT_ICONS.items()}
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.arm_button = self.icon_button("arm", self.toggle_arm)
+        self.transport_button = self.icon_button("transport", self.toggle_run)
+        self.pause = self.icon_button("pause", self.toggle_pause)
+        for button in (self.arm_button, self.transport_button, self.pause):
+            controls.addWidget(button)
+        row.addLayout(controls, 0, 1)
         layout.addWidget(toolbar)
 
         body = QHBoxLayout()
@@ -208,8 +245,6 @@ class Studio(QMainWindow):
         self.globals.textEdited.connect(self.modified)
         form.addRow("전역 변수", self.globals)
         side.addLayout(form)
-        self.pause = self.button("일시정지", self.toggle_pause)
-        side.addWidget(self.pause)
         debug_row = QHBoxLayout()
         self.debug_button = self.button("디버그 시작", lambda: self.start(debug=True))
         self.debug_button.setToolTip("블록을 우클릭해 브레이크포인트를 설정하세요.")
@@ -247,6 +282,26 @@ class Studio(QMainWindow):
         button.clicked.connect(action)
         return button
 
+    def icon_button(self, name, action):
+        button = self.button("", action, name)
+        button.setProperty("transportIcon", True)
+        button.setFixedSize(42, 42)
+        button.setIconSize(QSize(20, 20))
+        return button
+
+    def set_icon_action(self, button, icon, label):
+        button.setIcon(self.transport_icons[icon])
+        button.setToolTip(label)
+        button.setAccessibleName(label)
+
+    @staticmethod
+    def set_style_state(widget, name, value):
+        if widget.property(name) != value:
+            widget.setProperty(name, value)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
+
     def ready(self):
         self.editor_ready = True
         self.load_workspace()
@@ -280,27 +335,29 @@ class Studio(QMainWindow):
         changed = " • 저장 안 됨" if self.dirty else ""
         self.setWindowTitle(f"{name}{changed} | Macro Studio")
         self.mode.setText("실입력 · ARM" if armed else "드라이런")
-        self.mode.setProperty("armed", armed)
-        self.mode.style().unpolish(self.mode)
-        self.mode.style().polish(self.mode)
+        self.set_style_state(self.mode, "armed", armed)
         self.footer.setText(f"{name}{changed}    |    {self.path.name if self.path else '저장된 파일 없음'}")
         self.state_label.setText(STATES.get(self.session_state, "대상 창 전환 대기") if self.running
                                  else STATES[self.session_state] if self.session_state in STATES else "준비")
-        self.start_button.setEnabled(self.editor_ready and not self.running)
+        self.transport_button.setEnabled(self.running or self.editor_ready)
+        self.set_style_state(self.transport_button, "stopping", self.running)
+        self.set_icon_action(self.transport_button, "stop" if self.running else "play",
+                             "정지" if self.running else "시작")
         self.verify_button.setEnabled(self.editor_ready)
-        self.stop_button.setEnabled(self.running)
         at_breakpoint = self.running and self.session_state == "BREAKPOINT"
         self.debug_button.setEnabled(self.editor_ready and not self.running and not armed)
         self.step_button.setEnabled(at_breakpoint)
         self.pause.setEnabled(self.running and self.session_state in ("RUNNING", "PAUSED", "BREAKPOINT"))
-        self.pause.setText("재개" if self.session_state in ("PAUSED", "BREAKPOINT") else "일시정지")
+        resumable = self.session_state in ("PAUSED", "BREAKPOINT")
+        self.set_icon_action(self.pause, "resume" if resumable else "pause", "재개" if resumable else "일시정지")
         self.arm_button.setEnabled(bool(self.store) and not self.running)
+        self.set_style_state(self.arm_button, "armed", armed)
+        self.set_icon_action(self.arm_button, "armed" if armed else "arm", "ARM 해제" if armed else "ARM 설정")
         self.targets.setEnabled(bool(self.store) and not self.running)
         self.target_button.setEnabled(bool(self.store) and not self.running)
         sim = self.running and not armed and self.session_state == "RUNNING"
         self.simulate.setEnabled(sim)
         self.hotkey.setEnabled(sim)
-        self.arm_button.setText("ARM 해제" if armed else "ARM 설정")
 
     def log(self, text):
         self.logs.appendPlainText(text)
@@ -474,6 +531,12 @@ class Studio(QMainWindow):
             self.send("continue")
         else:
             self.send("resume" if self.session_state == "PAUSED" else "pause")
+
+    def toggle_run(self):
+        if self.running:
+            self.send("stop")
+        else:
+            self.start()
 
     def send_hotkey(self):
         try:
