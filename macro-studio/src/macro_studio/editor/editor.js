@@ -135,6 +135,14 @@ const workspace = Blockly.inject("workspace", {
 
 new QWebChannel(qt.webChannelTransport, channel => {
   const bridge = channel.objects.bridge;
+  Blockly.ContextMenuRegistry.registry.register({
+    id: "macro-studio-block-help",
+    scopeType: Blockly.ContextMenuRegistry.ScopeType.BLOCK,
+    weight: 7,
+    displayText: () => "도움말",
+    preconditionFn: ({block}) => block?.type.startsWith("ms_") ? "enabled" : "hidden",
+    callback: ({block}) => bridge.requestHelp(block.type),
+  });
   const breakpoint = "macro-studio:breakpoint";
   const styleBreakpoint = block => block.getSvgRoot()?.classList.toggle("msBreakpoint", block.data === breakpoint);
   Blockly.ContextMenuRegistry.registry.register({

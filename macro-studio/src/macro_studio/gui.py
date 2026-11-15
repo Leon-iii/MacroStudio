@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
+from .block_help import BlockHelp
 from .compiler import compile_project
 from .ir import normalize_hotkey
 from .live import ArmStore
@@ -51,6 +52,7 @@ class Bridge(QObject):
     focusBlock = Signal(str)
     loaded = Signal()
     updated = Signal(str)
+    helpRequested = Signal(str)
 
     @Slot()
     def ready(self):
@@ -59,6 +61,10 @@ class Bridge(QObject):
     @Slot(str)
     def changed(self, value):
         self.updated.emit(value)
+
+    @Slot(str)
+    def requestHelp(self, block_type):
+        self.helpRequested.emit(block_type)
 
 
 class LocalRequests(QWebEngineUrlRequestInterceptor):
@@ -123,6 +129,8 @@ class Studio(QMainWindow):
 
     def build(self):
         self.setStyleSheet(STYLE)
+        self.block_help = BlockHelp(self, ASSETS / "block_help.json")
+        self.bridge.helpRequested.connect(self.block_help.show_block)
         menu = self.menuBar().addMenu("파일")
         for title, shortcut, slot in (
             ("새 프로젝트", "Ctrl+N", self.create), ("열기…", "Ctrl+O", self.open),
