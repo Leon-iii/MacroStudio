@@ -136,7 +136,11 @@ $app = [Diagnostics.Process]::Start($start)
 try {
     $pidCondition = [Windows.Automation.PropertyCondition]::new(
         [Windows.Automation.AutomationElement]::ProcessIdProperty, $app.Id)
-    $window = Wait-For "Macro Studio window" { $root.FindFirst($findChildren, $pidCondition) }
+    $window = Wait-For "Macro Studio window" {
+        $root.FindAll($findChildren, $pidCondition) |
+            Where-Object { $_.Current.Name -like "* | Macro Studio" } |
+            Select-Object -First 1
+    }
     Wait-For "Blockly editor" {
         $verify = Named $window "검증"
         if ($verify -and $verify.Current.IsEnabled) { $true }
@@ -186,9 +190,11 @@ try {
             if ($text -match 'Runner 연결이 끊겼습니다|검증 실패') { throw "Runner log: $text" }
         }
     } | Out-Null
-    $stop = Button $window "정지"
-    $stop.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-    Wait-For "Runner stop" { (Button $window "시작").Current.IsEnabled } | Out-Null
+    if (-not $MotionShowcase) {
+        $stop = Button $window "정지"
+        $stop.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    Wait-For "Runner exit" { $runner.HasExited -and (Button $window "시작").Current.IsEnabled } | Out-Null
     "PASS: packaged editor, open/save and separate dry-run Runner"
 }
 finally {
