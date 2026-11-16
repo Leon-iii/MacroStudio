@@ -19,7 +19,12 @@ try {
     $dist = Join-Path (Join-Path $root "dist") $name
     $examples = New-Item -ItemType Directory -Force -Path (Join-Path $dist "examples")
     Copy-Item -Path "examples/*.macroproj" -Destination $examples.FullName
+    $docs = New-Item -ItemType Directory -Force -Path (Join-Path $dist "docs")
+    Copy-Item -LiteralPath "docs/MOUSE_MOTION_PROFILE.md", "docs/MOUSE_MOTION_ACCEPTANCE.md" -Destination $docs.FullName
     Copy-Item -LiteralPath "docs/WINDOWS.md" -Destination (Join-Path $dist "README.md")
+    $version = & $Python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+    if ($LASTEXITCODE -ne 0) { throw "Could not read the release version." }
+    Set-Content -Encoding ascii -LiteralPath (Join-Path $dist "VERSION") -Value $version
     $archive = Join-Path $root "dist/MacroStudio-Windows-x64.zip"
     & $Python -c "import shutil; shutil.make_archive('dist/MacroStudio-Windows-x64', 'zip', root_dir='dist', base_dir='MacroStudio')"
     if ($LASTEXITCODE -ne 0) { throw "ZIP creation failed." }

@@ -8,3 +8,5 @@ ZIP을 푼 뒤 `MacroStudio/MacroStudio.exe`를 실행합니다. 실행 파일�
 4. 실행 로그에 누름과 해제가 기록되는지 확인하고 **정지**를 누릅니다.
 
 일반 편집과 드라이런은 오프라인에서 사용할 수 있습니다. OCR 블록을 사용하는 경우 Tesseract를 별도로 설치하고 `tesseract.exe`가 있는 폴더를 Windows PATH에 추가하세요.
+
+마우스 모션 기능은 패키지의 `docs/MOUSE_MOTION_PROFILE.md`와 `examples/mouse_motion_showcase.macroproj`에서 확인할 수 있습니다.

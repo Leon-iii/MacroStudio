@@ -1,13 +1,16 @@
 from .ir import PARAM_PREFIX, SCREEN_SENSOR_OPS, ValidationError, normalize_hotkey, validate_program
+from .mouse_motion import BUILTIN_PROFILES, DEFAULT_PROFILE
+from .mouse_motion.registry import project_motion_profiles
 
 
-def compile_project(project):
+def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profiles=None):
     workspace = project["workspace"]
     workflows = {}
     handlers = []
     states = {}
     transitions = []
     initial = None
+    version = 1
 
     def fail(block, message):
         raise ValidationError(f"({block.get('id', '?')}) {message}")
@@ -136,6 +139,7 @@ def compile_project(project):
         return events
 
     def steps(block):
+        nonlocal version
         result = []
         while block:
             kind = block["type"].removeprefix("ms_")
@@ -157,6 +161,20 @@ def compile_project(project):
                     step.update(position=position_value(block), button=field(block, "BUTTON"), hold_ns=50_000_000)
                 case "mouse_move":
                     step.update(position=position_value(block), duration=duration_value(block))
+                case "mouse_move_timed" | "mouse_move_relative_timed":
+                    version = 2
+                    default, snapshots = project_motion_profiles(project)
+                    profiles = BUILTIN_PROFILES | (user_profiles or {}) | snapshots
+                    ref = field(block, "PROFILE") or "inherit"
+                    profile = (profiles[default] if default else application_profile) if ref == "inherit" else profiles.get(ref)
+                    if profile is None:
+                        fail(block, f"모션 프로파일을 찾을 수 없습니다. {ref}")
+                    step.update(
+                        op="mouse_move_timed",
+                        target={"kind": "absolute" if kind == "mouse_move_timed" else "relative", **position_value(block)},
+                        motion={"profile_ref": ref, "profile": profile.to_dict(),
+                                "duration": duration_value(block) if child(block, "DURATION") else None},
+                    )
                 case "key_tap" | "tap_sequence":
                     step.update(key=keyboard_value(block), **hold_time(block))
                     if kind == "tap_sequence":
@@ -269,7 +287,7 @@ def compile_project(project):
     machine = {"state_machine": {"initial": initial, "states": states, "transitions": transitions}} if states or transitions else {}
     try:
         ir = validate_program({
-            "ir_version": 1, "project_id": project["project_id"],
+            "ir_version": version, "project_id": project["project_id"],
             "globals": project.get("globals", {}), "workflows": workflows, "handlers": handlers,
             **machine,
         })

@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Invalid IR: {exc}", file=sys.stderr)
         return 2
     if args.command == "validate":
-        print("Valid IR v1")
+        print(f"Valid IR v{program['ir_version']}")
         return 0
 
     clock = VirtualClock()

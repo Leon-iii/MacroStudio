@@ -14,6 +14,11 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 INPUT_KEYBOARD = 1
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+VIRTUAL_DESKTOP_METRICS = (76, 77, 78, 79)  # X, Y, width, height
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 MOUSE_BUTTON_FLAGS = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010),
                       "middle": (0x0020, 0x0040)}
 MAPVK_VSC_TO_VK_EX = 3
@@ -79,6 +84,21 @@ def _scan_code(key: str) -> int:
     return value
 
 
+def normalize_absolute(position, desktop):
+    left, top, width, height = desktop
+    normalized = []
+    for value, origin, span in zip(position, (left, top), (width, height)):
+        offset = value - origin
+        if not 0 <= offset < span:
+            raise OSError("position is outside the virtual desktop")
+        # The centre of the 16-bit bucket avoids rounding to the adjacent pixel.
+        code = ((2 * offset + 1) * 32768) // span
+        if (code * span) // 65536 != offset:
+            raise OSError("position is not addressable by SendInput")
+        normalized.append(code)
+    return tuple(normalized)
+
+
 class WindowsDesktop:
     def __init__(self) -> None:
         if sys.platform != "win32":
@@ -95,6 +115,8 @@ class WindowsDesktop:
         self._iconic = self._bind(user32.IsIconic, w.BOOL, w.HWND)
         self._cursor = self._bind(user32.GetCursorPos, w.BOOL, c.POINTER(w.POINT))
         self._set_cursor = self._bind(user32.SetCursorPos, w.BOOL, c.c_int, c.c_int)
+        self._system_metric = self._bind(user32.GetSystemMetrics, c.c_int, c.c_int)
+        self._set_dpi_context = self._bind(user32.SetThreadDpiAwarenessContext, w.HANDLE, w.HANDLE)
         self._window_at = self._bind(user32.WindowFromPoint, w.HWND, w.POINT)
         self._ancestor = self._bind(user32.GetAncestor, w.HWND, w.HWND, w.UINT)
         self._window_thread = self._bind(
@@ -183,6 +205,22 @@ class WindowsDesktop:
     def send_mouse_move(self, position: tuple[int, int]) -> None:
         if not self._set_cursor(*position):
             raise c.WinError(c.get_last_error())
+
+    @contextmanager
+    def physical_coordinates(self):
+        previous = self._set_dpi_context(c.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+        if not previous:
+            raise c.WinError(c.get_last_error())
+        try:
+            yield
+        finally:
+            self._set_dpi_context(previous)
+
+    def send_mouse_absolute(self, position: tuple[int, int]) -> None:
+        desktop = tuple(self._system_metric(metric) for metric in VIRTUAL_DESKTOP_METRICS)
+        x, y = normalize_absolute(position, desktop)
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE
+        self._insert(Input(0, InputData(mouse=MouseInput(x, y, 0, flags, 0, 0))))
 
     @contextmanager
     def hotkeys(self, mapping: dict[int, str]):

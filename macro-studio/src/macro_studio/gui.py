@@ -27,6 +27,13 @@ from .image_assets import ImageAssetsDialog, asset_files, asset_references, vali
 from .ir import normalize_hotkey
 from .key_capture import KeyCaptureDialog
 from .live import ArmStore
+from .mouse_motion import BUILTIN_PROFILES, DEFAULT_PROFILE_ID
+from .mouse_motion.registry import (
+    MotionProfileRegistry, capture_motion_profiles, motion_block_references, project_motion_profiles,
+    set_project_motion_profile,
+)
+from .mouse_motion_preview import MotionPreviewDialog
+from .mouse_profile_dialog import MotionProfilesDialog
 from .output import HidMode, OutputKind
 from .properties_panel import PropertiesPanel, workspace_properties
 from .sensors import sensor_specs
@@ -90,8 +97,9 @@ QScrollArea#inspector QScrollBar::add-line:vertical, QScrollArea#inspector QScro
 QScrollArea#inspector QScrollBar::add-page:vertical, QScrollArea#inspector QScrollBar::sub-page:vertical { background: transparent; }
 QPlainTextEdit { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; padding: 6px; }
 QTabWidget#inspectorTabs::pane { border: 0; border-left: 1px solid #cbd5e1; }
-QTabWidget#inspectorTabs QTabBar::tab { padding: 8px 16px; color: #475b74; }
-QTabWidget#inspectorTabs QTabBar::tab:selected { border-bottom: 2px solid #2455cb; color: #19283b; }
+QTabWidget#motionEditorTabs::pane { border: 0; }
+QTabWidget#inspectorTabs QTabBar::tab, QTabWidget#motionEditorTabs QTabBar::tab { padding: 8px 16px; color: #475b74; }
+QTabWidget#inspectorTabs QTabBar::tab:selected, QTabWidget#motionEditorTabs QTabBar::tab:selected { border-bottom: 2px solid #2455cb; color: #19283b; }
 QListWidget, QTreeWidget { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; }
 QListWidget::item, QTreeWidget::item { padding: 4px 5px; }
 QListWidget::item:selected, QTreeWidget::item:selected { background: #e1e9f5; color: #19283b; }
@@ -157,6 +165,7 @@ class Bridge(QObject):
     helpRequested = Signal(str)
     imageAssetsChanged = Signal(str)
     propertyOptionsChanged = Signal(str)
+    motionProfilesChanged = Signal(str)
     navigateBlock = Signal(str)
 
     @Slot()
@@ -234,6 +243,7 @@ class Studio(QMainWindow):
         self.session_state = "STOPPED"
         self.session_mode = None
         self.store = ArmStore.local() if sys.platform == "win32" else None
+        self.motion_profiles = MotionProfileRegistry.local()
         self.bridge = Bridge(self)
         self.process = QProcess(self)
         self.runner_assets = None
@@ -275,6 +285,14 @@ class Studio(QMainWindow):
             action.setShortcut(shortcut)
         images = self.menuBar().addMenu("이미지")
         self.manage_images = images.addAction("이미지 에셋 관리…", self.open_image_assets)
+        self.mouse_menu = self.menuBar().addMenu("마우스")
+        self.project_motion_menu = self.mouse_menu.addMenu("프로젝트 기본 모션 프로파일")
+        self.app_motion_menu = self.mouse_menu.addMenu("앱 기본 모션 프로파일")
+        self.mouse_menu.addAction("모션 프로파일 관리…", self.open_motion_profiles)
+        self.mouse_menu.addAction("궤적 미리보기…", self.open_motion_preview)
+        self.mouse_menu.addSeparator()
+        self.mouse_menu.addAction("기본 마우스 설정 복원…", self.reset_motion_default)
+        self.mouse_menu.aboutToShow.connect(self.refresh_motion_menu)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -467,6 +485,7 @@ class Studio(QMainWindow):
     def load_workspace(self):
         self.update_properties(publish=True)
         self.publish_image_assets()
+        self.publish_motion_profiles()
         self.bridge.loadWorkspace.emit(json.dumps(self.project["workspace"], ensure_ascii=False))
         self.refresh()
 
@@ -474,6 +493,105 @@ class Studio(QMainWindow):
         assets = self.project.get("image_assets", {})
         self.bridge.imageAssetsChanged.emit(json.dumps({key: asset["name"] for key, asset in assets.items()},
                                                        ensure_ascii=False))
+
+    def refresh_motion_menu(self):
+        project_menu, app_menu = self.project_motion_menu, self.app_motion_menu
+        project_menu.clear()
+        app_menu.clear()
+        project_default, snapshots = project_motion_profiles(self.project)
+        try:
+            app_default, users = self.motion_profiles.load()
+        except (ValueError, OSError) as error:
+            app_default, users = None, {}
+            notice = app_menu.addAction("앱 설정을 읽을 수 없습니다")
+            notice.setToolTip(str(error))
+            notice.setEnabled(False)
+
+        self.motion_choice(project_menu, "앱 기본값 사용", project_default is None,
+                           lambda: self.choose_project_motion(None))
+        project_menu.addSeparator()
+        for profile in (BUILTIN_PROFILES | users | snapshots).values():
+            self.motion_choice(project_menu, profile.name, profile.id == project_default,
+                               lambda profile=profile: self.choose_project_motion(profile))
+        if project_default in users and snapshots.get(project_default) != users[project_default]:
+            profile = users[project_default]
+            project_menu.addAction(f"{profile.name} · 최신 버전 적용", lambda: self.choose_project_motion(profile))
+        if app_default is not None:
+            for profile in (BUILTIN_PROFILES | users).values():
+                self.motion_choice(app_menu, profile.name, profile.id == app_default,
+                                   lambda profile_id=profile.id: self.choose_app_motion(profile_id))
+
+    @staticmethod
+    def motion_choice(menu, label, checked, choose):
+        action = menu.addAction(label)
+        action.setCheckable(True)
+        action.setChecked(checked)
+        action.triggered.connect(lambda _checked: choose())
+
+    def choose_project_motion(self, profile):
+        expected = profile.id if profile is not None else None
+        current, snapshots = project_motion_profiles(self.project)
+        if expected != current or (profile and profile.origin == "user" and snapshots.get(expected) != profile):
+            set_project_motion_profile(self.project, profile)
+            self.modified()
+            self.publish_motion_profiles()
+
+    def choose_app_motion(self, profile_id):
+        try:
+            self.motion_profiles.set_default(profile_id)
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, "앱 기본값 저장 실패", str(error))
+
+    def open_motion_profiles(self):
+        try:
+            project_default, _ = project_motion_profiles(self.project)
+            dialog = MotionProfilesDialog(self, self.motion_profiles, project_default,
+                                          motion_block_references(self.project["workspace"]))
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, "모션 프로파일 관리", str(error))
+            return
+        dialog.exec()
+        dialog.deleteLater()
+        self.publish_motion_profiles()
+
+    def application_motion_profiles(self):
+        try:
+            default, users = self.motion_profiles.load()
+        except (ValueError, OSError):
+            return None, {}
+        return (BUILTIN_PROFILES | users)[default], users
+
+    def publish_motion_profiles(self):
+        _, users = self.application_motion_profiles()
+        _, snapshots = project_motion_profiles(self.project)
+        profiles = BUILTIN_PROFILES | users | snapshots
+        self.bridge.motionProfilesChanged.emit(json.dumps(
+            [[profile.name, profile.id] for profile in profiles.values()], ensure_ascii=False))
+
+    def open_motion_preview(self):
+        try:
+            default, snapshots = project_motion_profiles(self.project)
+            if default is None:
+                default, snapshots = self.motion_profiles.load()
+            profile = (BUILTIN_PROFILES | snapshots)[default]
+        except (ValueError, OSError) as error:
+            QMessageBox.warning(self, "궤적 미리보기", str(error))
+            return
+        dialog = MotionPreviewDialog(self, profile)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def reset_motion_default(self):
+        dialog = QMessageBox(QMessageBox.Icon.Question, "기본 마우스 설정 복원",
+                             "복원할 범위를 선택하세요.", parent=self)
+        project = dialog.addButton("프로젝트 기본값", QMessageBox.ButtonRole.ActionRole)
+        app = dialog.addButton("앱 기본값", QMessageBox.ButtonRole.ActionRole)
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.exec()
+        if dialog.clickedButton() is project:
+            self.choose_project_motion(None)
+        elif dialog.clickedButton() is app:
+            self.choose_app_motion(DEFAULT_PROFILE_ID)
 
     def open_image_assets(self):
         if self.running:
@@ -734,7 +852,8 @@ class Studio(QMainWindow):
                 )
                 self.hid_mode.setEnabled(True)
                 self.set_hid_status(f"{port} 연결 확인", "ready",
-                                    f"{device['board']} · 펌웨어 {device['firmware']} · HID {device['protocol']}")
+                                    f"{device['board']} · 펌웨어 {device['firmware']} · HID {device['protocol']}\n"
+                                    "상대 이동은 실제 목표 좌표를 보장하지 않습니다.")
 
     def log(self, text):
         self.logs.appendPlainText(text)
@@ -783,6 +902,7 @@ class Studio(QMainWindow):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
             validate_assets(project.get("image_assets", {}))
             project_output(project)
+            project_motion_profiles(project)
             if (not isinstance(project.get("globals", {}), dict)
                     or not isinstance(project.get("events", []), list)
                     or not all(isinstance(name, str) and name.strip() for name in project.get("events", []))):
@@ -809,6 +929,8 @@ class Studio(QMainWindow):
         from PySide6.QtCore import QSaveFile
         try:
             project = dict(self.project, name=path.stem)
+            _, users = self.application_motion_profiles()
+            capture_motion_profiles(project, users)
             if copy:
                 project["project_id"] = uuid4().hex
             output = QSaveFile(str(path))
@@ -838,7 +960,8 @@ class Studio(QMainWindow):
         self.jump.setEnabled(False)
         self.jump_to_error()
         try:
-            program, detached = compile_project(self.project)
+            application_profile, users = self.application_motion_profiles()
+            program, detached = compile_project(self.project, application_profile=application_profile, user_profiles=users)
             sensor_specs(program)
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             match = re.search(r"\(([^()]*)\)", str(error))

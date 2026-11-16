@@ -181,6 +181,24 @@ class PropertyField extends Blockly.FieldDropdown {
 }
 Blockly.fieldRegistry.register("field_studio_property", PropertyField);
 
+let motionProfiles = [["프로젝트 기본값", "inherit"]];
+class MotionProfileField extends PropertyField {
+  static fromJson() {
+    return new MotionProfileField(() => motionProfiles);
+  }
+}
+Blockly.fieldRegistry.register("field_studio_motion_profile", MotionProfileField);
+
+const profiledMoveInputs = () => [
+  value("POSITION", "Position"), value("DURATION", "Duration"), {type: "input_end_row"},
+];
+const profiledMoveOptions = {
+  message1: "모션 프로파일 %1",
+  args1: [{type: "field_studio_motion_profile", name: "PROFILE"}],
+  inputsInline: true,
+  tooltip: "시간을 비우면 선택한 모션 프로파일의 기본 이동 시간을 사용합니다.",
+};
+
 const batchEdge = {previousStatement: "BatchEdge", nextStatement: "BatchEdge", inputsInline: true};
 const batchOffset = () => number("OFFSET", 0, 0, 5000, 1);
 const batchAction = () => dropdown("ACTION", [["누르기", "down"], ["해제하기", "up"]]);
@@ -213,6 +231,10 @@ Blockly.defineBlocksWithJsonArray([
     colour: palette.input, inputsInline: true},
   statement("mouse_move", "input", "마우스를 %1 로 %2 동안 움직이기",
     [value("POSITION", "Position"), value("DURATION", "Duration")], {inputsInline: true}),
+  statement("mouse_move_timed", "input", "마우스를 %1 로 %2 동안 이동 %3",
+    profiledMoveInputs(), profiledMoveOptions),
+  statement("mouse_move_relative_timed", "input", "마우스를 Δ %1 만큼 %2 동안 이동 %3",
+    profiledMoveInputs(), profiledMoveOptions),
   statement("mouse_click_at", "input", "%1 를 %2 하기", [value("POSITION", "Position"),
     dropdown("BUTTON", [["좌클릭", "left"], ["우클릭", "right"], ["가운데 클릭", "middle"]])], {inputsInline: true}),
   statement("tap_sequence", "input", "%1 키 연타 %2 Hz · %3 · %4 회",
@@ -306,7 +328,8 @@ Blockly.defineBlocksWithJsonArray([
 const categories = [
   ["이벤트", "event", ["start", "hotkey", "interval", "custom", "emit_event"]],
   ["키보드", "input", ["key", "key_tap", "tap_sequence"]],
-  ["마우스", "input", ["position", "mouse_move", "mouse_click_at", "mouse_click"]],
+  ["마우스", "input", ["position", "mouse_move", "mouse_move_timed", "mouse_move_relative_timed",
+                     "mouse_click_at", "mouse_click"]],
   ["시간", "time", ["duration", "wait_time", "timed_batch", "batch_key", "batch_button", "batch_move"]],
   ["제어", "control", ["repeat", "forever", "while", "if_only", "if", "break", "continue", "end"]],
   ["변수", "variable", ["set", "variable", "text"]],
@@ -343,6 +366,8 @@ const toolboxInputs = {
   position: positionInputs,
   wait_time: {DURATION: defaultDuration},
   mouse_move: {POSITION: defaultPosition, DURATION: defaultDuration},
+  mouse_move_timed: {POSITION: defaultPosition},
+  mouse_move_relative_timed: {POSITION: defaultPosition},
   mouse_click_at: {POSITION: defaultPosition},
   pixel_color: {POSITION: defaultPosition},
   region_image: defaultRegion,
@@ -754,6 +779,20 @@ new QWebChannel(qt.webChannelTransport, channel => {
   const bridge = channel.objects.bridge;
   pickColour = (initial, done) => bridge.chooseColour(initial, done);
   listenForKey = (mode, done) => bridge.chooseKey(mode, done);
+  function refreshMotionProfile(block) {
+    const field = block?.getField("PROFILE");
+    if (!(field instanceof MotionProfileField)) return;
+    field.refreshOptions();
+    const id = field.getValue();
+    block.setWarningText(motionProfiles.some(([, value]) => value === id)
+      ? null : "모션 프로파일을 찾을 수 없습니다.");
+  }
+  bridge.motionProfilesChanged.connect(data => {
+    motionProfiles = [["프로젝트 기본값", "inherit"], ...JSON.parse(data)];
+    for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
+      for (const block of editor.getAllBlocks(false)) refreshMotionProfile(block);
+    }
+  });
   bridge.propertyOptionsChanged.connect(data => {
     Object.assign(propertyNames, JSON.parse(data));
     for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
@@ -839,6 +878,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
       const state = JSON.parse(data);
       state.blocks?.blocks?.forEach(upgradeBlockInputs);
       Blockly.serialization.workspaces.load(state, workspace);
+      workspace.getAllBlocks(false).forEach(refreshMotionProfile);
       syncCallArguments(workflowSignatures());
       workspace.getAllBlocks(false).forEach(styleBreakpoint);
       workspace.clearUndo();
@@ -899,7 +939,9 @@ new QWebChannel(qt.webChannelTransport, channel => {
       }
       if (event.type === Blockly.Events.BLOCK_CREATE) {
         event.ids?.map(id => workspace.getBlockById(id)).filter(Boolean).forEach(styleBreakpoint);
+        event.ids?.forEach(id => refreshMotionProfile(workspace.getBlockById(id)));
       }
+      if (event.type === Blockly.Events.BLOCK_CHANGE && event.name === "PROFILE") refreshMotionProfile(block);
       scheduleWorkspacePublish();
     }
   });

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "project_id": "v1-2-mouse-motion-showcase",
+  "name": "마우스 모션 프로파일 예제",
+  "globals": {},
+  "settings": {"default_mouse_motion_profile_id": "builtin.precision"},
+  "output_profile": {"output_kind": "fake"},
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": [{
+        "type": "ms_start",
+        "id": "example-start",
+        "x": 70,
+        "y": 60,
+        "next": {"block": {
+          "type": "ms_mouse_move_timed",
+          "id": "example-absolute",
+          "fields": {"PROFILE": "inherit"},
+          "inputs": {"POSITION": {"block": {
+            "type": "ms_position",
+            "inputs": {
+              "X": {"shadow": {"type": "ms_number", "fields": {"VALUE": 260}}},
+              "Y": {"shadow": {"type": "ms_number", "fields": {"VALUE": 180}}}
+            }
+          }}},
+          "next": {"block": {
+            "type": "ms_mouse_move_relative_timed",
+            "id": "example-relative",
+            "fields": {"PROFILE": "builtin.direct"},
+            "inputs": {
+              "POSITION": {"block": {
+                "type": "ms_position",
+                "inputs": {
+                  "X": {"shadow": {"type": "ms_number", "fields": {"VALUE": 100}}},
+                  "Y": {"shadow": {"type": "ms_number", "fields": {"VALUE": -40}}}
+                }
+              }},
+              "DURATION": {"block": {
+                "type": "ms_duration",
+                "fields": {"UNIT": "ms"},
+                "inputs": {"VALUE": {"shadow": {"type": "ms_number", "fields": {"VALUE": 500}}}}
+              }}
+            }
+          }}
+        }}
+      }]
+    }
+  }
+}

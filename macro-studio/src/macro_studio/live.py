@@ -159,9 +159,14 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             cleanup.callback(hid.release_stuck_inputs)
             profile = OutputProfile("external_hid", OutputKind.EXTERNAL_HID, mode)
             routes[OutputKind.EXTERNAL_HID] = OutputRoute(
-                replace(hid.capabilities, timed_batch=mode is HidMode.ADAPTIVE or (
+                replace(hid.capabilities, profiled_mouse=mode is not HidMode.ONBOARD and hid.capabilities.profiled_mouse,
+                        timed_batch=mode is HidMode.ADAPTIVE or (
                     mode is HidMode.ONBOARD and hid.capabilities.timed_batch)), lambda: hid)
         session = OutputRouter(routes).bind(program, RunConfig(profile, dry_run=False, armed=True))
+        if program["ir_version"] >= 2:
+            outputs.enter_context(desktop.physical_coordinates())
+            if hid is not None:
+                status("External HID 상대 이동 · 실제 목표 좌표 보장 안 됨")
         adaptive_steps = device_steps(live_program, hid.capabilities) if mode is HidMode.ADAPTIVE else None
         if hid is not None:
             if (control and control() == "stop") or 1 in desktop.poll_hotkeys():
@@ -232,11 +237,15 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
                 raise TaskFault("pointer_outside_target", "destination must be over the target window")
 
         runtime = Runtime(live_program, clock, session.backend)
+        if hid is None and program["ir_version"] >= 2:
+            runtime.send_profiled_move = desktop.send_mouse_absolute
         runtime.before_press = before_press
         runtime.modifiers_pressed = desktop.modifiers_pressed
         runtime.before_move = before_move
         if hid is not None and hid.capabilities.mouse_relative:
             runtime.send_pointer_delta = hid.send_delta
+            if session.capabilities.profiled_mouse:
+                runtime.send_profiled_report = hid.send_pointer_report
         if mode in (HidMode.ONBOARD, HidMode.ADAPTIVE):
             runtime.onboard_taps = hid
             runtime.onboard_done = lambda count: status(f"Onboard TAP_TRAIN completed: {count} taps")

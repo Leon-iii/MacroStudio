@@ -6,6 +6,8 @@ import subprocess
 import pytest
 
 from macro_studio.external_hid import Frame, FrameParser, Opcode, encode
+from macro_studio.external_hid.trajectory_batch import timed_pointer_batch
+from macro_studio.mouse_motion import BUILTIN_PROFILES, MotionGenerator
 
 
 def test_leonardo_sketch_accepts_host_frames_and_releases_inputs(tmp_path):
@@ -129,3 +131,26 @@ def test_leonardo_sketch_accepts_host_frames_and_releases_inputs(tmp_path):
     assert replies[2][0].opcode == replies[3][0].opcode == Opcode.NACK
     assert replies[4][0].payload == b"\x0c\x01\x00"
     assert replies[7][0] == Frame(Opcode.JOB_DONE, pack("<HBIH", 1, 0, 2, 0), session_id=token)
+
+    trajectory = MotionGenerator.generate((0, 0), (25, 0), BUILTIN_PROFILES["builtin.direct"], 7, 20)
+    edges = timed_pointer_batch(trajectory, max_payload=64, minimum_interval_us=1000)
+    motion_payload = b"".join(pack("<IBbb", edge["offset_us"], 5, edge["dx"], edge["dy"]) for edge in edges)
+    commands = [
+        (0, frame(Opcode.HELLO, 1, pack("<BBI", 1, 0, token), token=token)),
+        (0, frame(Opcode.ARM_SESSION, 2, token=token)),
+        (0, frame(Opcode.QUEUE_BATCH, 3, pack("<HB", 1, len(edges)) + motion_payload, token=token)),
+        (0, frame(Opcode.START_JOB, 4, pack("<H", 1), token=token)),
+        *((5, "-") for _ in range(4)),
+        (0, frame(Opcode.QUEUE_BATCH, 5, pack("<HB", 2, len(edges)) + motion_payload, token=token)),
+        (0, frame(Opcode.START_JOB, 6, pack("<H", 2), token=token)),
+        (5, "-"), (0, frame(Opcode.CANCEL_JOB, 7, pack("<H", 2), token=token)), (25, "-"),
+    ]
+    result = subprocess.run(
+        [program], input="".join(f"{ms} 1 {packet}\n" for ms, packet in commands),
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    rows = [row.split(" ") for row in result.stdout.splitlines()]
+    replies = [FrameParser().feed(bytes.fromhex(row[0])) for row in rows]
+    assert [int(rows[i][3]) for i in (3, 4, 5, 6, 7, 10, 11, 12)] == [0, 4, 12, 21, 25, 29, 29, 29]
+    assert replies[7][-1] == Frame(Opcode.JOB_DONE, pack("<HBIH", 1, 0, len(edges), 0), session_id=token)
+    assert replies[11][-1] == Frame(Opcode.JOB_DONE, pack("<HBIH", 2, 1, 1, 0), session_id=token)

@@ -1,4 +1,5 @@
 from struct import pack, unpack
+from ..mouse_motion.quantizer import HID_REPORT_LIMIT
 
 from ..output import BackendCapabilities
 from .codec import Opcode
@@ -46,6 +47,7 @@ class HidBackend:
             mouse_buttons=device["mouse_buttons"] and device["max_payload"] >= 3,
             mouse_relative=relative,
             mouse_absolute=relative,
+            profiled_mouse=relative,
             onboard_tap_train=device["max_onboard_jobs"] >= 1 and device["max_payload"] >= 18,
             timed_batch=device.get("timed_batch", False) and device["max_payload"] >= 59,
         )
@@ -188,6 +190,12 @@ class HidBackend:
         self.send_delta((position[0] - x, position[1] - y))
 
     def send_delta(self, delta: tuple[int, int]) -> None:
-        x, y = (max(-127, min(127, axis)) for axis in delta)
+        x, y = (max(-HID_REPORT_LIMIT, min(HID_REPORT_LIMIT, axis)) for axis in delta)
+        self.send_pointer_report((x, y))
+
+    def send_pointer_report(self, delta: tuple[int, int]) -> None:
+        x, y = delta
+        if not all(-HID_REPORT_LIMIT <= axis <= HID_REPORT_LIMIT for axis in delta):
+            raise ValueError("HID relative report exceeds its signed range")
         if x or y:
             self.link.exchange(Opcode.INPUT_EVENT, pack("<Bhh", 3, x, y))

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Macro Studio mouse motion profile",
+  "description": "Motion settings only. The runtime also validates the Nyquist limit and sample count.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["motion_profile_schema_version", "id", "name", "origin", "revision", "parameters"],
+  "properties": {
+    "motion_profile_schema_version": {"type": "integer", "const": 1},
+    "id": {"type": "string"},
+    "name": {"type": "string", "pattern": "\\S"},
+    "origin": {"enum": ["builtin", "user"]},
+    "revision": {"type": "integer", "minimum": 1},
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_ms", "base_curve", "sampling_hz", "speed", "lateral", "endpoint_envelope", "seed_policy"],
+      "properties": {
+        "duration_ms": {"type": "number", "minimum": 1, "maximum": 60000},
+        "base_curve": {"const": "smoothstep"},
+        "sampling_hz": {"type": "integer", "minimum": 10, "maximum": 1000},
+        "speed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sigma", "correlation_ms"],
+          "properties": {
+            "sigma": {"type": "number", "minimum": 0, "maximum": 1.5},
+            "correlation_ms": {"$ref": "#/$defs/correlation_ms"}
+          }
+        },
+        "lateral": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tremor_amplitude_px", "tremor_frequency_hz", "drift_amplitude_px", "drift_correlation_ms"],
+          "properties": {
+            "tremor_amplitude_px": {"$ref": "#/$defs/amplitude_px"},
+            "tremor_frequency_hz": {"type": "number", "minimum": 0, "maximum": 100},
+            "drift_amplitude_px": {"$ref": "#/$defs/amplitude_px"},
+            "drift_correlation_ms": {"$ref": "#/$defs/correlation_ms"}
+          }
+        },
+        "endpoint_envelope": {"const": "sin_squared"},
+        "seed_policy": {"enum": ["fixed", "random_per_execution"]}
+      }
+    }
+  },
+  "if": {"properties": {"origin": {"const": "builtin"}}},
+  "then": {
+    "properties": {
+      "id": {"enum": ["builtin.direct", "builtin.precision", "builtin.smooth", "builtin.natural", "builtin.tremor"]}
+    }
+  },
+  "else": {
+    "properties": {
+      "id": {"pattern": "^user\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+    }
+  },
+  "$defs": {
+    "correlation_ms": {"type": "number", "minimum": 1, "maximum": 5000},
+    "amplitude_px": {"type": "number", "minimum": 0, "maximum": 200}
+  }
+}

@@ -37,6 +37,7 @@ class BackendCapabilities:
     mouse_buttons: bool = False
     mouse_relative: bool = False
     mouse_absolute: bool = False
+    profiled_mouse: bool = False
     onboard_tap_train: bool = False
     timed_batch: bool = False
 
@@ -60,9 +61,9 @@ class UnsupportedCapability(ValueError):
 
 FAKE_PROFILE = OutputProfile("fake", OutputKind.FAKE)
 SENDINPUT_PROFILE = OutputProfile("sendinput", OutputKind.SENDINPUT)
-DESKTOP_CAPABILITIES = BackendCapabilities(keyboard=True, mouse_buttons=True, mouse_absolute=True)
+DESKTOP_CAPABILITIES = BackendCapabilities(keyboard=True, mouse_buttons=True, mouse_absolute=True, profiled_mouse=True)
 FAKE_CAPABILITIES = BackendCapabilities(
-    keyboard=True, mouse_buttons=True, mouse_relative=True, mouse_absolute=True, timed_batch=True,
+    keyboard=True, mouse_buttons=True, mouse_relative=True, mouse_absolute=True, profiled_mouse=True, timed_batch=True,
 )
 
 _STEP_CAPABILITIES = {
@@ -70,6 +71,7 @@ _STEP_CAPABILITIES = {
     "tap_sequence": ("keyboard",),
     "mouse_click": ("mouse_buttons",),
     "mouse_move": ("mouse_absolute",),
+    "mouse_move_timed": ("profiled_mouse",),
     "mouse_click_at": ("mouse_absolute", "mouse_buttons"),
     "timed_batch": ("timed_batch",),
 }
@@ -82,6 +84,9 @@ def _validate_steps(steps: list[dict], path: str, capabilities: BackendCapabilit
             if not getattr(capabilities, capability):
                 block_id = step.get("block_id")
                 source = f"{location} (block {block_id})" if block_id else location
+                if capability == "profiled_mouse":
+                    raise UnsupportedCapability(
+                        f"{source}: output does not support profiled_mouse; select SendInput or relative HID Streaming/Adaptive")
                 raise UnsupportedCapability(f"{source}: output does not support {capability}")
         if step["op"] == "timed_batch":
             for edge in step["events"]:

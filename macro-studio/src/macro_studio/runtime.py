@@ -1,11 +1,15 @@
+from bisect import bisect_right
 from collections import ChainMap, deque
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
 from heapq import heapify, heappop, heappush
 from itertools import count, takewhile
+from secrets import randbits
 
 from .backend import Clock, InputBackend
 from .ir import MAX_CALL_DEPTH, MAX_REPEAT_COUNT, PARAM_PREFIX, duration_nanoseconds, evaluate
+from .mouse_motion import MotionGenerator, MouseMotionProfile
+from .mouse_motion.quantizer import RelativeQuantizer, first_report
 
 
 MAX_ACTIVE_TASKS = 256
@@ -16,6 +20,7 @@ YIELD_NS = 1_000_000
 SECOND_NS = 1_000_000_000
 STATE_CHECK_NS = 200_000_000
 POINTER_STEP_NS = 16_000_000
+HID_POINTER_REPORT_NS = 8_000_000
 POINTER_CORRECTION_NS = 600_000_000
 POINTER_CORRECTION_STEPS = 32
 KEYBOARD_RETRY_NS = 5_000_000
@@ -79,7 +84,10 @@ class Runtime:
         self.before_press: Callable[[str], None] | None = None
         self.modifiers_pressed: Callable[[], bool] | None = None
         self.before_move: Callable[[tuple[int, int]], None] | None = None
+        self.send_profiled_move: Callable[[tuple[int, int]], None] | None = None
         self.send_pointer_delta: Callable[[tuple[int, int]], None] | None = None
+        self.send_profiled_report: Callable[[tuple[int, int]], None] | None = None
+        self._next_profiled_report = 0
         self.onboard_taps = None
         self.onboard_done: Callable[[int], None] | None = None
         self.batch_done: Callable[[int], None] | None = None
@@ -109,6 +117,7 @@ class Runtime:
         self.globals = dict(self.program["globals"])
         self.errors.clear()
         self._adaptive_routes.clear()
+        self._next_profiled_report = 0
         self.missed_ticks = 0
         self._input_failed = False
         self.termination = "completed"
@@ -470,6 +479,8 @@ class Runtime:
                     return
                 case "mouse_move":
                     yield from self._move_pointer(task, step, scope, self._duration_ns(step, scope))
+                case "mouse_move_timed":
+                    yield from self._profiled_mouse_move(task, step, scope)
                 case "key_tap" | "mouse_click" | "mouse_click_at":
                     hold_ns = self._duration_ns(step, scope, legacy_key="hold_ns")
                     click_position = None
@@ -511,9 +522,86 @@ class Runtime:
             raise TaskFault(f"{step['op']}_duration", "hold duration must be positive")
         return nanoseconds
 
-    def _move_pointer(self, task: Task, step: dict, scope: dict, duration_ns: int) -> Generator[int, None, tuple[int, int]]:
+    def _require_free_pointer(self) -> None:
         if self._batch_active or self._pointer_owner is not None or any(key.startswith("mouse:") for key in self._owners):
             raise TaskFault("input_conflict", "mouse pointer or button is already in use")
+
+    def _profiled_mouse_move(self, task: Task, step: dict, scope: dict) -> Iterator[int]:
+        self._require_free_pointer()
+        target = step["target"]
+        origin = self._pointer_position()
+        x, y = (round(self._evaluate(target[axis], scope)) for axis in ("x", "y"))
+        if target["kind"] == "relative":
+            x, y = origin[0] + x, origin[1] + y
+        destination = (x, y)
+        if not (-32768 <= x <= 32767 and -32768 <= y <= 32767):
+            raise TaskFault("invalid_position", "mouse coordinates must be between -32768 and 32767")
+        if self.before_move is not None:
+            self.before_move(destination)
+        motion = step["motion"]
+        profile = MouseMotionProfile.from_dict(motion["profile"])
+        override = motion.get("duration")
+        duration = (duration_nanoseconds(self._evaluate(override["value"], scope), override["unit"]) / 1e6
+                    if override is not None else None)
+        seed = motion.get("seed_override")
+        if seed is None:
+            seed = 7 if profile.seed_policy == "fixed" else randbits(64)
+        trajectory = MotionGenerator.generate(origin, destination, profile, seed, duration)
+        if not trajectory.duration_ns:
+            return
+
+        self._pointer_owner = task
+        start = self.clock.now_ns
+        if self.send_profiled_report is not None:
+            yield from self._stream_profiled_mouse(trajectory, start, self.send_profiled_report)
+            self._pointer_owner = None
+            return
+        points = trajectory.points
+        send = self.send_profiled_move or self.backend.send_mouse_move
+        previous = origin
+        index = 1
+        while index < len(points):
+            yield start + points[index].time_offset_ns
+            elapsed = self.clock.now_ns - start
+            index = bisect_right(points, elapsed, lo=index, key=lambda point: point.time_offset_ns) - 1
+            point = points[index]
+            position = (round(point.x), round(point.y))
+            if position != previous or index == len(points) - 1:
+                if self.before_move is not None:
+                    self.before_move(position)
+                self._send(position, "mouse_move", start + point.time_offset_ns, send)
+                previous = position
+            index += 1
+        self._pointer_owner = None
+
+    def _stream_profiled_mouse(self, trajectory, start, send) -> Iterator[int]:
+        points = trajectory.points
+        quantizer = RelativeQuantizer(trajectory.start)
+        index = 1
+        deadline = start + points[index].time_offset_ns
+        while True:
+            yield max(deadline, self._next_profiled_report)
+            elapsed = self.clock.now_ns - start
+            index = bisect_right(points, elapsed, lo=index, key=lambda point: point.time_offset_ns) - 1
+            point = points[index]
+            delta = quantizer.remaining(point)
+            if delta != (0, 0):
+                if self.before_move is not None:
+                    self.before_move((round(point.x), round(point.y)))
+                    self.before_move(self._pointer_position())
+                report = first_report(delta)
+                self._send(report, "mouse_move", start + point.time_offset_ns, send)
+                quantizer.record(report)
+                self._next_profiled_report = self.clock.now_ns + HID_POINTER_REPORT_NS
+                if report != delta:
+                    continue
+            index += 1
+            if index == len(points):
+                return
+            deadline = start + points[index].time_offset_ns
+
+    def _move_pointer(self, task: Task, step: dict, scope: dict, duration_ns: int) -> Generator[int, None, tuple[int, int]]:
+        self._require_free_pointer()
         x = round(self._evaluate(step["position"]["x"], scope))
         y = round(self._evaluate(step["position"]["y"], scope))
         if not (-32768 <= x <= 32767 and -32768 <= y <= 32767):

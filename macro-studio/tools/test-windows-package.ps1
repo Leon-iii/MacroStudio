@@ -1,6 +1,7 @@
 ﻿param(
     [string] $Package = "$PSScriptRoot/../dist/MacroStudio",
-    [switch] $RequireNoPython
+    [switch] $RequireNoPython,
+    [switch] $MotionShowcase
 )
 
 $ErrorActionPreference = "Stop"
@@ -120,7 +121,9 @@ $packageRoot = (Resolve-Path -LiteralPath $Package).Path
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("MacroStudio-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $original = Join-Path $scratch "original.macroproj"
-Copy-Item -LiteralPath (Join-Path $packageRoot "examples/mixed-loop.macroproj") $original
+$example = if ($MotionShowcase) { "mouse_motion_showcase.macroproj" } else { "mixed-loop.macroproj" }
+Copy-Item -LiteralPath (Join-Path $packageRoot "examples/$example") $original
+$sourceProject = Get-Content -Raw -Encoding utf8 -LiteralPath $original | ConvertFrom-Json
 
 $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $packageRoot "MacroStudio.exe"))
 $start.UseShellExecute = $false
@@ -140,13 +143,18 @@ try {
     } | Out-Null
     Invoke-FileAction "열기…"
     Enter-Path "프로젝트 열기" $original
-    Wait-For "opened project" { $window.Current.Name -like "mixed-loop*Macro Studio" } | Out-Null
+    Wait-For "opened project" { $window.Current.Name.StartsWith("$($sourceProject.name) | Macro Studio") } | Out-Null
 
     Invoke-FileAction "저장"
     Wait-For "saved project" { $window.Current.Name -like "original*Macro Studio" } | Out-Null
     $saved = Get-Content -Raw -Encoding utf8 -LiteralPath $original | ConvertFrom-Json
-    if ($saved.name -ne "original" -or $saved.workspace.blocks.blocks.Count -lt 2) {
+    if ($saved.name -ne "original" -or
+        $saved.workspace.blocks.blocks.Count -ne $sourceProject.workspace.blocks.blocks.Count) {
         throw "Saved Blockly project did not match the example."
+    }
+    if ($MotionShowcase -and ($saved.settings.default_mouse_motion_profile_id -ne "builtin.precision" -or
+        $saved.workspace.blocks.blocks[0].next.block.next.block.fields.PROFILE -ne "builtin.direct")) {
+        throw "Saved project did not retain its motion profiles."
     }
     $action = Button $window "시작"
     $action.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -173,7 +181,8 @@ try {
             if ($log.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
                 $text += $pattern.Current.Value
             }
-            if ($text -match '누름 · scan:' -and $text -match '해제 · scan:') { return $true }
+            if ($MotionShowcase -and $text -match '이동 · 마우스 X 360 Y 140') { return $true }
+            if (-not $MotionShowcase -and $text -match '누름 · scan:' -and $text -match '해제 · scan:') { return $true }
             if ($text -match 'Runner 연결이 끊겼습니다|검증 실패') { throw "Runner log: $text" }
         }
     } | Out-Null

@@ -3,6 +3,8 @@ import operator
 from random import uniform
 import re
 
+from .mouse_motion import MouseMotionProfile
+
 MAX_REPEAT_COUNT = 1_000_000
 MAX_CALL_DEPTH = 32
 MAX_DURATION_NS = 86_400_000_000_000
@@ -295,7 +297,7 @@ def _batch_events(raw, path):
     return normalized
 
 
-def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loop=False):
+def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loop=False, ir_version=1):
     if depth > 32:
         raise ValidationError(f"{path}: block nesting exceeds 32")
     result = []
@@ -306,8 +308,8 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             block_id = _name(step["block_id"], f"{location}.block_id")
             location = f"{location} ({block_id})"
         op = step.get("op")
-        if op in ("mouse_move", "mouse_click_at"):
-            position = _object(step.get("position"), location)
+        if op in ("mouse_move", "mouse_click_at", "mouse_move_timed"):
+            position = _object(step.get("target" if op == "mouse_move_timed" else "position"), location)
             for axis in ("x", "y"):
                 coordinate = position.get(axis)
                 axis_path = f"{location}.{axis}"
@@ -324,6 +326,28 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
                 _integer(step.get("duration_ns"), 0, MAX_DURATION_NS, location)
         elif op == "mouse_move":
             _duration(step.get("duration"), variables, location)
+        elif op == "mouse_move_timed":
+            if ir_version < 2:
+                raise ValidationError(f"{location}: profiled move requires IR version 2")
+            if position.get("kind") not in ("absolute", "relative"):
+                raise ValidationError(f"{location}: expected absolute or relative target")
+            motion = dict(_object(step.get("motion"), location))
+            try:
+                profile = MouseMotionProfile.from_dict(motion.get("profile"))
+            except ValueError as error:
+                raise ValidationError(f"{location}: {error}") from error
+            if motion.get("profile_ref") not in ("inherit", profile.id):
+                raise ValidationError(f"{location}: motion profile reference does not match its snapshot")
+            duration = motion.get("duration")
+            if duration is not None:
+                ns = _duration(duration, variables, location)
+                if ns is not None and not 1_000_000 <= ns <= 60_000_000_000:
+                    raise ValidationError(f"{location}: profiled duration must be between 1 and 60000 ms")
+            seed = motion.get("seed_override")
+            if seed is not None and type(seed) is not int:
+                raise ValidationError(f"{location}: motion seed must be an integer")
+            motion["profile"] = profile.to_dict()
+            step["motion"] = motion
         elif op == "emit_event":
             step["name"] = _event_name(step.get("name"), location)
         elif op == "timed_batch":
@@ -352,13 +376,13 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             elif op == "while":
                 _require_type(step.get("condition"), variables, bool, location)
             step["steps"] = _steps(step.get("steps"), workflows, variables, location,
-                                   depth + 1, return_type, in_loop=True)
+                                   depth + 1, return_type, in_loop=True, ir_version=ir_version)
         elif op == "if":
             _require_type(step.get("condition"), variables, bool, location)
             for branch in ("then", "else"):
                 raw_branch = step.get("else", []) if branch == "else" else step.get("then")
                 step[branch] = _steps(raw_branch, workflows, variables, location,
-                                      depth + 1, return_type, in_loop=in_loop)
+                                      depth + 1, return_type, in_loop=in_loop, ir_version=ir_version)
         elif op == "set":
             name = _name(step.get("var"), location)
             if name not in variables or name.startswith(PARAM_PREFIX):
@@ -385,7 +409,7 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
                     raise ValidationError(f"{location}: branching requires a boolean return value")
                 for branch in ("then", "else"):
                     step[branch] = _steps(step.get(branch, []), workflows, variables, location,
-                                          depth + 1, return_type, in_loop=in_loop)
+                                          depth + 1, return_type, in_loop=in_loop, ir_version=ir_version)
         elif op == "return":
             if return_type is None:
                 raise ValidationError(f"{location}: this workflow has no return type")
@@ -401,7 +425,7 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
 
 def validate_program(data: object) -> dict:
     raw = _object(data, "program")
-    _integer(raw.get("ir_version"), 1, 1, "ir_version")
+    version = _integer(raw.get("ir_version"), 1, 2, "ir_version")
     project_id = _name(raw.get("project_id"), "project_id")
     initial = _object(raw.get("globals", {}), "globals")
     variables = {
@@ -433,7 +457,7 @@ def validate_program(data: object) -> dict:
         scope = {**variables, **{PARAM_PREFIX + param["name"]: VALUE_TYPES[param["type"]]
                                  for param in workflow["params"]}}
         workflow["steps"] = _steps(definitions[name].get("steps"), workflows, scope,
-                                   f"workflow {name}", return_type=workflow["return_type"])
+                                   f"workflow {name}", return_type=workflow["return_type"], ir_version=version)
 
     handlers = []
     ids = set()
@@ -478,7 +502,7 @@ def validate_program(data: object) -> dict:
             _require_type(handler["guard"], variables, bool, path)
         handlers.append(handler)
     result = {
-        "ir_version": 1, "project_id": project_id, "globals": dict(initial),
+        "ir_version": version, "project_id": project_id, "globals": dict(initial),
         "workflows": workflows, "handlers": handlers,
     }
     if "state_machine" in raw:
