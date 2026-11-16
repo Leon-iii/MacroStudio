@@ -1,0 +1,22 @@
+ts	phase	decision	why	evidence	result
+2026-11-16T20:02:18Z	start	별도 저장소 기준 커밋	기존 변경과 새 v1.3 구현을 분리	adca3b3, auto-maple 3ecc9f6	커밋 완료
+2026-11-16T20:02:18Z	baseline	기존 테스트를 실행	v1.2 회귀 비교	macro-studio/tests	233개 통과
+2026-11-16T20:02:18Z	design	캡처 처리와 입력 Task의 소유권 분리	캡처 지연이 입력을 막는 경로를 피함	macro-studio/docs/VISUAL_RECOGNITION_GAP.md	구현 중
+2026-11-16T20:09:58Z	VR-0–2	MSS·OpenCV 서비스와 프로파일을 먼저 커밋	실행기 연결 전 캡처·좌표·인식·에지 동작을 독립적으로 검증	233e5f7	새 기반 테스트 16개 통과
+2026-11-16T20:09:58Z	VR-1	실제 Windows 모니터에서 작은 ROI를 캡처	가짜 프레임과 별도로 MSS 호출을 검증	macro-studio/tools/check-vision.py capture	10초 276프레임, 오류 0
+2026-11-16T20:09:58Z	VR-2	고정 프레임의 실제 박스를 반복 비교	OpenCV 진단이 작업과 결과를 모두 확인	macro-studio/tools/check-vision.py recognize	30회 정답, 오류 0
+2026-11-16T20:09:58Z	VR-3–4	예제 IR을 실제 Perception Worker와 Fake 출력으로 실행	정확한 박스 중심으로 Natural 이동과 클릭을 확인	macro-studio/tests/test_vision_example.py	통과
+2026-11-16T20:13:49Z	review	캡처 실패가 기존 인식 좌표를 무효화하도록 수정	TTL 안의 캐시도 소스 실패 후 동작에 쓰일 수 있었음	macro-studio/tests/test_perception.py	복구 전후 회귀 테스트 통과
+2026-11-16T20:13:49Z	review	인식 좌표의 예약 클릭과 UNKNOWN 원인을 명시	미리 예약한 클릭은 실행 직전 재검사 불가	macro-studio/tests/test_vision_runtime.py	예약 클릭 차단과 오류 코드 테스트 통과
+2026-11-16T20:13:49Z	VR-4	실제 Windows 창에서 캡처 후 Fake 이동과 클릭	데스크톱 픽셀 좌표 반환과 런타임 연결 확인	verify-vision-desktop.py	ROI 중심 (960, 516), 클릭 눌림·해제, 오류 0
+2026-11-16T20:21:01Z	VR-4	실제 출력 직전 좌표를 새 인식 결과로 검증	이동 중 화면이 바뀌면 기존 클릭 좌표를 쓰지 않음	8b7b670	인식·런타임·예제 포함 27개 통과
+2026-11-16T20:21:01Z	VR-5	네이티브 Qt에서 프로파일과 미리보기 렌더를 점검	글자·필드 길이와 박스 위치를 확인	vision-profile-native.png, vision-preview-native.png	렌더 확인
+2026-11-16T20:21:01Z	VR-5	Qt 150%에서 같은 배율로 등록한 템플릿을 사용	내장 1배율 템플릿 점수 0.835, 화면 내 장치 배율이 다름	verify-vision-desktop-recapture.py	실좌표 검색 및 Fake 클릭 통과
+2026-11-16T20:21:01Z	VR-6	Fake 출력 100·200Hz에서 인식 OFF/ON을 번갈아 비교	입력 성능과 화면 캡처 성능을 구분	macro-studio/tools/check-vision.py schedule	각 조건 5회, 150쌍 완료, 누락 0
+2026-11-16T20:21:01Z	VR-6	배포본으로 별도 Runner와 MSS 작업 프로세스를 실행	개발 환경의 Python 모듈에 기대지 않는지 확인	verify-vision-packaged.py	실제 창 인식, Fake 입력 1쌍, 오류 0
+2026-11-16T20:31:00Z	review	전용 HSV 블록과 프로파일 상속을 보강	프로파일을 골라도 기본 블록 임계값이 덮어쓰던 문제를 확인	macro-studio/tests/test_vision_runtime.py, macro-studio/tests/test_vision_ui.py	컴파일 및 UI 회귀 통과
+2026-11-16T20:31:00Z	VR-6	30초 동안 100Hz 스케줄을 Fake 출력으로 반복	짧은 테스트와 별도로 지속 요청 경로를 확인	macro-studio/tools/check-vision.py schedule --hz 100 --pairs 3000 --repeats 1	두 조건 모두 3000쌍 완료, 검출 559프레임, 누락 0
+2026-11-16T20:31:00Z	VR-6	최종 소스 전체 테스트 재실행	마지막 UI 변경 후 v1.2 경로까지 재검증	macro-studio/tests	279개 통과
+2026-11-16T20:33:46Z	VR-6	최종 Windows 편집기로 인식 예제를 열고 저장하고 검증	패키지의 Blockly와 템플릿 참조를 함께 확인	macro-studio/tools/test-windows-package.ps1 -VisionShowcase	통과
+2026-11-16T20:33:46Z	VR-6	기존 모션 예제와 새 인식 Runner를 최종 패키지에서 실행	기존 출력 경로와 새 캡처 작업 프로세스를 함께 검증	macro-studio/tools/test-windows-package.ps1 -MotionShowcase, verify-vision-packaged.py	두 검사 통과, 실입력은 Fake
+2026-11-16T20:33:46Z	release	최종 가이드와 Blockly 파일이 들어간 ZIP 검사	사용 안내와 실행 파일 배포를 한 버전으로 맞춤	macro-studio/dist/MacroStudio-Windows-x64.zip	1.3.0, CRC 검사 통과, SHA256 AD5DE93EE8037E17AC7B15A83899DB11DDDB5B2D689DA027421299FC4E1475E2

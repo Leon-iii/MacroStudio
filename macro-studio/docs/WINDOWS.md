@@ -10,3 +10,5 @@ ZIP을 푼 뒤 `MacroStudio/MacroStudio.exe`를 실행합니다. 실행 파일�
 일반 편집과 드라이런은 오프라인에서 사용할 수 있습니다. OCR 블록을 사용하는 경우 Tesseract를 별도로 설치하고 `tesseract.exe`가 있는 폴더를 Windows PATH에 추가하세요.
 
 마우스 모션 기능은 패키지의 `docs/MOUSE_MOTION_PROFILE.md`와 `examples/mouse_motion_showcase.macroproj`에서 확인할 수 있습니다.
+
+**이미지 인식** 메뉴에서 화면 템플릿, 인식 프로파일, 미리보기를 관리할 수 있습니다. 배포본에는 MSS와 OpenCV가 포함됩니다. [시각 인식 안내](docs/VISUAL_RECOGNITION.md)

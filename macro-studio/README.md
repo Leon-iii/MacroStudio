@@ -61,14 +61,14 @@ JSON 보고서는 발행 시도, OS 삽입 성공과 실패, 누락 주기, 스�
 ## Blockly 데스크톱 편집기
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[gui,test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[gui,vision,test]"
 .\.venv\Scripts\python.exe -m macro_studio.gui
 ```
 
 Windows x64 배포본을 빌드하려면 프로젝트 폴더에서 다음을 실행합니다. ZIP은 `dist/MacroStudio-Windows-x64.zip`에 생성됩니다. [배포본 실행과 확인 절차](docs/WINDOWS.md)
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[gui,build]"
+.\.venv\Scripts\python.exe -m pip install -e ".[gui,vision,build]"
 .\tools\build-windows.ps1
 ```
 
@@ -111,6 +111,8 @@ Python이 없는 Windows 11 x64에서 자동 검증하려면 ZIP을 풀고 `tool
 정의에서 반환 타입을 고르고 **반환** 블록에 값을 연결합니다. **결과를 변수에 저장**은 반환값과 같은 타입의 전역 변수에 저장합니다. **결과가 참이면**은 불리언 반환값으로 분기합니다. 반환 타입을 지정한 워크플로가 값을 반환하지 않고 끝나면 호출 블록에 실행 오류가 표시됩니다.
 
 ### 화면 센서
+
+v1.3의 **이미지 인식** 메뉴는 템플릿 캡처, 프로파일 관리와 미리보기를 제공합니다. 인식 결과를 찾아 이동하고 클릭하는 예제와 검증 명령은 [시각 인식 사용 안내](docs/VISUAL_RECOGNITION.md)에 있습니다.
 
 **화면 센서** 팔레트에서 픽셀 색상이나 영역 이미지 조건을 꺼내 **만약** 또는 이벤트의 **조건**에 연결합니다.
 

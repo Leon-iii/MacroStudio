@@ -7,7 +7,7 @@ from threading import Thread
 from uuid import uuid4
 
 from PySide6.QtCore import (
-    QByteArray, QIODevice, QObject, QPointF, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl, Signal, Slot,
+    QByteArray, QIODevice, QObject, QPointF, QProcess, QSettings, QSignalBlocker, QSize, QTimer, Qt, QUrl, Signal, Slot,
 )
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from .block_help import BlockHelp
 from .compiler import compile_project
 from .external_hid.serial_link import list_ports, probe_port
-from .image_assets import ImageAssetsDialog, asset_files, asset_references, validate_assets
+from .image_assets import ImageAssetsDialog, asset_files, asset_references, encode_image, store_asset, validate_assets
 from .ir import normalize_hotkey
 from .key_capture import KeyCaptureDialog
 from .live import ArmStore
@@ -37,6 +37,8 @@ from .mouse_profile_dialog import MotionProfilesDialog
 from .output import HidMode, OutputKind
 from .properties_panel import PropertiesPanel, workspace_properties
 from .sensors import sensor_specs
+from .vision_dialog import CaptureDialog, PreviewDialog, ProfileDialog
+from .vision_profiles import BUILTIN_PROFILES as VISION_BUILTINS, DEFAULT_PROFILE as DEFAULT_VISION_PROFILE, resolve_profile, validate_profiles
 
 ASSETS = Path(__file__).with_name("editor")
 
@@ -166,6 +168,7 @@ class Bridge(QObject):
     imageAssetsChanged = Signal(str)
     propertyOptionsChanged = Signal(str)
     motionProfilesChanged = Signal(str)
+    visionProfilesChanged = Signal(str)
     navigateBlock = Signal(str)
 
     @Slot()
@@ -244,6 +247,7 @@ class Studio(QMainWindow):
         self.session_mode = None
         self.store = ArmStore.local() if sys.platform == "win32" else None
         self.motion_profiles = MotionProfileRegistry.local()
+        self.vision_settings = QSettings("MacroStudio", "MacroStudio")
         self.bridge = Bridge(self)
         self.process = QProcess(self)
         self.runner_assets = None
@@ -283,8 +287,6 @@ class Studio(QMainWindow):
         ):
             action = menu.addAction(title, slot)
             action.setShortcut(shortcut)
-        images = self.menuBar().addMenu("이미지")
-        self.manage_images = images.addAction("이미지 에셋 관리…", self.open_image_assets)
         self.mouse_menu = self.menuBar().addMenu("마우스")
         self.project_motion_menu = self.mouse_menu.addMenu("프로젝트 기본 모션 프로파일")
         self.app_motion_menu = self.mouse_menu.addMenu("앱 기본 모션 프로파일")
@@ -293,6 +295,12 @@ class Studio(QMainWindow):
         self.mouse_menu.addSeparator()
         self.mouse_menu.addAction("기본 마우스 설정 복원…", self.reset_motion_default)
         self.mouse_menu.aboutToShow.connect(self.refresh_motion_menu)
+        self.vision_menu = self.menuBar().addMenu("이미지 인식")
+        self.vision_menu.addAction("화면에서 템플릿 캡처…", self.capture_template)
+        self.manage_images = self.vision_menu.addAction("템플릿 라이브러리…", self.open_image_assets)
+        self.vision_menu.addAction("인식 프로파일 관리…", self.open_vision_profiles)
+        self.vision_menu.addAction("실시간 인식 미리보기…", self.open_vision_preview)
+        self.vision_menu.addAction("캡처 엔진 설정…", self.open_capture_settings)
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -486,6 +494,7 @@ class Studio(QMainWindow):
         self.update_properties(publish=True)
         self.publish_image_assets()
         self.publish_motion_profiles()
+        self.publish_vision_profiles()
         self.bridge.loadWorkspace.emit(json.dumps(self.project["workspace"], ensure_ascii=False))
         self.refresh()
 
@@ -493,6 +502,11 @@ class Studio(QMainWindow):
         assets = self.project.get("image_assets", {})
         self.bridge.imageAssetsChanged.emit(json.dumps({key: asset["name"] for key, asset in assets.items()},
                                                        ensure_ascii=False))
+
+    def publish_vision_profiles(self):
+        profiles = VISION_BUILTINS | self.project.get("vision_profiles", {})
+        self.bridge.visionProfilesChanged.emit(json.dumps(
+            [[profile["name"], profile_id] for profile_id, profile in profiles.items()], ensure_ascii=False))
 
     def refresh_motion_menu(self):
         project_menu, app_menu = self.project_motion_menu, self.app_motion_menu
@@ -599,8 +613,132 @@ class Studio(QMainWindow):
         dialog = ImageAssetsDialog(
             self, self.project.setdefault("image_assets", {}),
             lambda asset_id: asset_references(self.project["workspace"], asset_id), self.image_assets_changed,
+            VISION_BUILTINS | self.project.get("vision_profiles", {}),
         )
         dialog.exec()
+
+    def open_vision_profiles(self):
+        if self.running:
+            return
+        try:
+            validate_profiles(self.project.get("vision_profiles", {}))
+        except ValueError as error:
+            QMessageBox.warning(self, "인식 프로파일", str(error))
+            return
+        dialog = ProfileDialog(self, self.project, self.vision_profiles_changed,
+                               self.application_vision_profile, self.choose_app_vision_profile,
+                               lambda profile_id, profile: self.open_vision_preview(profile_id, profile))
+        dialog.exec()
+        dialog.deleteLater()
+        self.publish_vision_profiles()
+
+    def vision_profiles_changed(self):
+        self.publish_vision_profiles()
+        self.modified()
+
+    def application_vision_profile(self):
+        profile_id = self.vision_settings.value("default_vision_profile_id", DEFAULT_VISION_PROFILE)
+        return profile_id if profile_id in VISION_BUILTINS else DEFAULT_VISION_PROFILE
+
+    def choose_app_vision_profile(self, profile_id):
+        if profile_id not in VISION_BUILTINS:
+            return
+        self.vision_settings.setValue("default_vision_profile_id", profile_id)
+        self.vision_settings.sync()
+
+    def capture_sources(self):
+        try:
+            from .perception import list_capture_sources
+            return list_capture_sources()
+        except Exception as error:
+            QMessageBox.warning(self, "캡처 소스", f"화면 캡처 소스를 읽지 못했습니다.\n{error}")
+            return []
+
+    def open_capture_settings(self):
+        if self.running:
+            return
+        sources = self.capture_sources()
+        if not sources:
+            return
+        dialog = QDialog(self, windowTitle="캡처 엔진 설정")
+        form = QFormLayout(dialog)
+        source = FlatComboBox()
+        for info in sources:
+            source.addItem(f"{info.source_id} · {info.region.width} × {info.region.height}", info.source_id)
+        source.setCurrentIndex(max(0, source.findData(self.project.get("vision_source", "monitor.1"))))
+        fps = QSpinBox()
+        fps.setRange(5, 60)
+        fps.setValue(self.project.get("vision_fps", 30))
+        fps.setSuffix(" FPS")
+        form.addRow("캡처 화면", source)
+        form.addRow("목표 캡처 빈도", fps)
+        form.addRow(QLabel("선택한 화면은 인식 실행 또는 미리보기 시작 후에만 캡처합니다."))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.project["vision_source"] = source.currentData()
+            self.project["vision_fps"] = fps.value()
+            self.modified()
+
+    def capture_template(self):
+        if self.running:
+            return
+        sources = self.capture_sources()
+        if not sources:
+            return
+        source, ok = QInputDialog.getItem(self, "화면에서 템플릿 캡처", "캡처할 화면",
+                                          [f"{item.source_id} · {item.region.width} × {item.region.height}"
+                                           for item in sources],
+                                          max(0, next((i for i, item in enumerate(sources)
+                                                       if item.source_id == self.project.get("vision_source")), 0)),
+                                          False)
+        if not ok:
+            return
+        source_id = sources[[f"{item.source_id} · {item.region.width} × {item.region.height}"
+                             for item in sources].index(source)].source_id
+        try:
+            from .perception import capture_once
+            frame = capture_once(source_id)
+        except Exception as error:
+            QMessageBox.warning(self, "화면 캡처 실패", str(error))
+            return
+        dialog = CaptureDialog(self, frame)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.selection is None:
+            return
+        image, (left, top, width, height) = dialog.selection
+        assets = self.project.setdefault("image_assets", {})
+        metadata = {"source_id": frame.source_id, "capture_origin": {
+            "x": frame.origin_x + left, "y": frame.origin_y + top},
+            "width_px": width, "height_px": height}
+        try:
+            image_id, created = store_asset(assets, dialog.name.text().strip(), encode_image(image),
+                                            source="screen_selection", capture_metadata=metadata)
+        except ValueError as error:
+            QMessageBox.warning(self, "템플릿 저장 실패", str(error))
+            return
+        if not created:
+            QMessageBox.information(self, "템플릿 중복", f"‘{assets[image_id]['name']}’ 템플릿과 같은 이미지입니다.")
+        else:
+            self.publish_image_assets()
+            self.modified()
+        self.open_image_assets()
+
+    def open_vision_preview(self, profile_ref=None, profile_override=None):
+        if self.running:
+            QMessageBox.information(self, "실시간 인식 미리보기", "실행 중에는 미리보기를 별도로 시작할 수 없습니다.")
+            return
+        sources = self.capture_sources()
+        if not sources:
+            return
+        dialog = PreviewDialog(
+            self, self.project, str(self.path.resolve().parent if self.path else Path.cwd()), sources,
+            application_profile=self.application_vision_profile(), profile_ref=profile_ref,
+            profile_override=profile_override,
+        )
+        dialog.exec()
+        dialog.deleteLater()
 
     def image_assets_changed(self):
         self.publish_image_assets()
@@ -901,6 +1039,12 @@ class Studio(QMainWindow):
                     or not isinstance(project.get("name"), str)):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
             validate_assets(project.get("image_assets", {}))
+            validate_profiles(project.get("vision_profiles", {}))
+            resolve_profile(project)
+            source_id = project.get("vision_source", "monitor.1")
+            vision_fps = project.get("vision_fps", 30)
+            if not isinstance(source_id, str) or not source_id.strip() or type(vision_fps) is not int or not 5 <= vision_fps <= 60:
+                raise ValueError("캡처 화면 또는 목표 캡처 빈도 설정이 잘못되었습니다.")
             project_output(project)
             project_motion_profiles(project)
             if (not isinstance(project.get("globals", {}), dict)
@@ -961,7 +1105,10 @@ class Studio(QMainWindow):
         self.jump_to_error()
         try:
             application_profile, users = self.application_motion_profiles()
-            program, detached = compile_project(self.project, application_profile=application_profile, user_profiles=users)
+            program, detached = compile_project(
+                self.project, application_profile=application_profile, user_profiles=users,
+                application_vision_profile=self.application_vision_profile(),
+            )
             sensor_specs(program)
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             match = re.search(r"\(([^()]*)\)", str(error))
@@ -1013,8 +1160,14 @@ class Studio(QMainWindow):
                 self.log("External HID 장치를 연결하고 COM 포트의 연결 확인을 완료하세요.")
                 self.hid_port.setFocus()
                 return
+        from .ir import vision_nodes
+        has_vision = any(node.get("op") in ("vision_find", "vision_wait", "vision_visible")
+                         or node.get("type") in ("on_image_appeared", "on_image_disappeared")
+                         for node in vision_nodes(program))
         ids = [spec["image"] for spec in sensor_specs(program)
                if spec["op"] == "region_image" and spec["image"].startswith("asset:")]
+        ids.extend(node.get("spec", {}).get("image") for node in vision_nodes(program)
+                   if node.get("spec", {}).get("image", "").startswith("asset:"))
         images = {}
         if ids:
             try:
@@ -1025,6 +1178,9 @@ class Studio(QMainWindow):
                 self.log(f"이미지 에셋 준비 실패 · {error}")
                 return
         config = {"program": program, "target": target, "query_target": selected, "debug": debug,
+                  "vision_capture": bool(has_vision),
+                  "vision_source": self.project.get("vision_source", "monitor.1"),
+                  "vision_fps": self.project.get("vision_fps", 30),
                   "image_assets": images, "project_directory": str(self.path.resolve().parent if self.path else Path.cwd())}
         if hid_port:
             config["hid_port"] = hid_port

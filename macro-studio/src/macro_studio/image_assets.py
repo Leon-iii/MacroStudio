@@ -1,31 +1,98 @@
 from base64 import b64decode, b64encode
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog,
     QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
 )
 
 
 MAX_IMAGE_EDGE = 1024
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_ASSETS = 256
 
 
 def validate_assets(assets):
-    if not isinstance(assets, dict) or any(
-        not key.startswith("asset:") or not isinstance(asset, dict)
-        or not isinstance(asset.get("name"), str) or not asset["name"].strip()
-        or not isinstance(asset.get("png"), str)
-        for key, asset in assets.items()
-    ):
+    if not isinstance(assets, dict) or len(assets) > MAX_ASSETS:
         raise ValueError("이미지 에셋 저장 형식이 올바르지 않습니다.")
+    for key, asset in assets.items():
+        if (not isinstance(key, str) or not key.startswith("asset:") or not isinstance(asset, dict)
+                or not isinstance(asset.get("name"), str) or not asset["name"].strip()
+                or not isinstance(asset.get("png"), str)
+                or set(asset) - {"name", "png", "source", "capture_metadata", "recognition_profile_id", "sha256"}
+                or ("source" in asset and asset["source"] not in ("import", "screen_selection"))
+                or ("capture_metadata" in asset and not isinstance(asset["capture_metadata"], dict))
+                or ("recognition_profile_id" in asset and not isinstance(asset["recognition_profile_id"], str))
+                or ("sha256" in asset and (not isinstance(asset["sha256"], str)
+                    or len(asset["sha256"]) != 64 or any(char not in "0123456789abcdef" for char in asset["sha256"])) )):
+            raise ValueError("이미지 에셋 저장 형식이 올바르지 않습니다.")
+        try:
+            data = b64decode(asset["png"], validate=True)
+        except ValueError as error:
+            raise ValueError(f"이미지 에셋 데이터를 읽을 수 없습니다. {asset['name']}") from error
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"이미지 파일은 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB 이하여야 합니다. {asset['name']}")
+        if "sha256" in asset and sha256(data).hexdigest() != asset["sha256"]:
+            raise ValueError(f"이미지 파일 해시가 일치하지 않습니다. {asset['name']}")
+        raw = QByteArray(data)
+        buffer = QBuffer(raw)
+        if not buffer.open(QIODevice.OpenModeFlag.ReadOnly):
+            raise ValueError(f"이미지 에셋을 열 수 없습니다. {asset['name']}")
+        reader = QImageReader(buffer)
+        size = reader.size()
+        if (bytes(reader.format()).lower() != b"png" or not size.isValid()
+                or max(size.width(), size.height()) > MAX_IMAGE_EDGE or reader.read().isNull()):
+            raise ValueError(f"이미지 에셋은 읽을 수 있는 PNG이며 각 변이 {MAX_IMAGE_EDGE}픽셀 이하여야 합니다. {asset['name']}")
+        buffer.close()
+
+
+def store_asset(assets, name, png, *, source="import", capture_metadata=None, replace=None):
+    """Insert or replace a project PNG and return its stable ID and whether it changed."""
+    data = b64decode(png, validate=True)
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"이미지 파일은 {MAX_IMAGE_BYTES // (1024 * 1024)} MiB 이하여야 합니다.")
+    digest = sha256(data).hexdigest()
+    for asset_id, asset in assets.items():
+        if asset_id != replace and sha256(b64decode(asset["png"], validate=True)).hexdigest() == digest:
+            if replace is not None:
+                raise ValueError(f"‘{asset['name']}’ 템플릿과 같은 이미지입니다.")
+            return asset_id, False
+    if replace is not None:
+        asset = assets[replace]
+        asset["png"] = png
+        asset["source"] = source
+        asset["sha256"] = digest
+        if capture_metadata is None:
+            asset.pop("capture_metadata", None)
+        else:
+            asset["capture_metadata"] = capture_metadata
+        return replace, True
+    used = {asset["name"] for asset in assets.values()}
+    base = name.strip() or "가져온 이미지"
+    unique = base
+    suffix = 2
+    while unique in used:
+        unique = f"{base} ({suffix})"
+        suffix += 1
+    if len(assets) >= MAX_ASSETS:
+        raise ValueError(f"프로젝트에는 이미지 에셋을 최대 {MAX_ASSETS}개까지 등록할 수 있습니다.")
+    asset_id = "asset:" + uuid4().hex
+    asset = {"name": unique, "png": png, "source": source, "sha256": digest}
+    if capture_metadata is not None:
+        asset["capture_metadata"] = capture_metadata
+    assets[asset_id] = asset
+    return asset_id, True
 
 
 def asset_references(value, asset_id):
     if isinstance(value, dict):
-        if value.get("type") == "ms_region_image" and value.get("fields", {}).get("IMAGE") == asset_id:
+        if value.get("type") in ("ms_region_image", "ms_vision_find", "ms_vision_wait", "ms_vision_visible",
+                                  "ms_on_image_appeared", "ms_on_image_disappeared") and value.get(
+                "fields", {}).get("IMAGE") == asset_id:
             return 1
         return sum(asset_references(child, asset_id) for child in value.values())
     if isinstance(value, list):
@@ -59,11 +126,12 @@ def encode_image(image):
 
 
 class ImageAssetsDialog(QDialog):
-    def __init__(self, parent, assets, references, changed):
+    def __init__(self, parent, assets, references, changed, profiles=None):
         super().__init__(parent)
         self.assets = assets
         self.references = references
         self.changed = changed
+        self.profiles = profiles or {"builtin.balanced": {"name": "Balanced"}}
         self.setWindowTitle("이미지 에셋 관리")
         self.resize(780, 530)
         layout = QVBoxLayout(self)
@@ -80,6 +148,17 @@ class ImageAssetsDialog(QDialog):
         right.addWidget(self.preview, 1)
         self.details = QLabel()
         right.addWidget(self.details)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("인식 프로파일"))
+        self.profile = QComboBox()
+        self.profile.addItem("프로젝트 기본값 사용", "inherit")
+        for profile_id, value in self.profiles.items():
+            self.profile.addItem(value["name"], profile_id)
+        profile_row.addWidget(self.profile, 1)
+        self.save_profile = QPushButton("적용")
+        self.save_profile.clicked.connect(self.apply_profile)
+        profile_row.addWidget(self.save_profile)
+        right.addLayout(profile_row)
         add = QHBoxLayout()
         layout.addLayout(add)
         self.button(add, "클립보드에서 붙여넣기", lambda: self.import_image(clipboard=True)).setShortcut("Ctrl+V")
@@ -128,6 +207,8 @@ class ImageAssetsDialog(QDialog):
         for button in self.edit_buttons:
             button.setEnabled(asset_id is not None)
         self.details.clear()
+        self.profile.setEnabled(asset_id is not None)
+        self.save_profile.setEnabled(asset_id is not None)
         if asset_id is None:
             self.preview.setText("등록한 이미지가 없습니다.")
             return
@@ -139,7 +220,14 @@ class ImageAssetsDialog(QDialog):
         except ValueError:
             self.preview.setText("미리보기를 불러올 수 없습니다.")
             return
-        self.details.setText(f"{pixmap.width()} × {pixmap.height()} px   ·   연결된 블록 {self.references(asset_id)}개")
+        metadata = asset.get("capture_metadata")
+        origin = metadata.get("capture_origin", {}) if isinstance(metadata, dict) else {}
+        source = asset.get("source", "import")
+        source_text = (f"화면 캡처 · {metadata.get('source_id', '소스')} · "
+                       f"({origin.get('x', 0)}, {origin.get('y', 0)})" if source == "screen_selection" else "가져온 이미지")
+        self.details.setText(f"{pixmap.width()} × {pixmap.height()} px   ·   연결된 블록 {self.references(asset_id)}개\n{source_text}")
+        profile_id = asset.get("recognition_profile_id", "inherit")
+        self.profile.setCurrentIndex(max(0, self.profile.findData(profile_id)))
         self.preview.setPixmap(pixmap.scaled(360, 320, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.FastTransformation))
 
@@ -167,21 +255,14 @@ class ImageAssetsDialog(QDialog):
                     raise ValueError("기준 이미지는 가로와 세로가 각각 1024픽셀 이하여야 합니다.")
                 image = reader.read()
             png = encode_image(image)
+            asset_id, changed = store_asset(self.assets, name, png, replace=asset_id)
         except ValueError as error:
             QMessageBox.warning(self, "이미지 등록 실패", str(error))
             return
-        if asset_id is None:
-            asset_id = "asset:" + uuid4().hex
-            used = {asset["name"] for asset in self.assets.values()}
-            base = name
-            suffix = 2
-            while name in used:
-                name = f"{base} ({suffix})"
-                suffix += 1
-            self.assets[asset_id] = {"name": name, "png": png}
-        else:
-            self.assets[asset_id]["png"] = png
-        self.changed()
+        if not changed:
+            QMessageBox.information(self, "이미지 등록", f"‘{self.assets[asset_id]['name']}’ 템플릿과 같은 이미지입니다.")
+        if changed:
+            self.changed()
         self.refresh(asset_id)
 
     def rename(self):
@@ -195,6 +276,18 @@ class ImageAssetsDialog(QDialog):
             QMessageBox.warning(self, "이름 변경 실패", "비어 있지 않은 고유한 이름을 입력하세요.")
             return
         asset["name"] = name
+        self.changed()
+        self.refresh(asset_id)
+
+    def apply_profile(self):
+        asset_id = self.selected_id()
+        if asset_id is None:
+            return
+        profile_id = self.profile.currentData()
+        if profile_id == "inherit":
+            self.assets[asset_id].pop("recognition_profile_id", None)
+        else:
+            self.assets[asset_id]["recognition_profile_id"] = profile_id
         self.changed()
         self.refresh(asset_id)
 

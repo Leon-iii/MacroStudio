@@ -272,6 +272,54 @@
     "example": "X 120, Y 80의 색상이 #00ff00과 일치하면 → 상태 전이",
     "related": ["ms_state_condition", "ms_region_image"]
   },
+  "ms_vision_find": {
+    "title": "이미지 찾기",
+    "summary": "선택한 템플릿을 화면에서 비동기로 찾고 결과를 변수에 저장합니다.",
+    "details": ["결과에는 FOUND, NOT_FOUND, UNKNOWN 상태와 전역 화면 좌표가 포함됩니다. 제한 시간 만료와 캡처 오류는 구분됩니다.", "프로파일의 진입·이탈 임계값과 결과 유효 기간이 기본값입니다. 블록의 빈 숫자 칸은 프로파일을 따르고, 숫자를 입력하면 해당 설정만 덮어씁니다.", "HSV 탐지는 픽셀 수와 면적 비율도 결과로 저장합니다.", "좌표를 사용하기 전에 상태가 FOUND이고 결과가 최신인지 확인하세요. 이동 후 클릭 전 재탐색은 안전한 기본값입니다.", "화면 캡처는 실행을 시작한 뒤에만 켜집니다."],
+    "related": ["ms_vision_wait", "ms_vision_result", "ms_mouse_move_timed"]
+  },
+  "ms_vision_wait": {
+    "title": "이미지 상태 기다리기",
+    "summary": "템플릿이 나타나거나 사라질 때까지 작업을 비차단 대기 상태로 둡니다.",
+    "details": ["기본 대기는 5초입니다. 무한 대기도 정지 명령에 응답합니다.", "결과 상태와 제한 시간은 이미지 미발견과 캡처 오류를 구분합니다."],
+    "related": ["ms_vision_find", "ms_vision_visible", "ms_end"]
+  },
+  "ms_vision_visible": {
+    "title": "이미지 보임",
+    "summary": "최근 인식 스냅샷에서 템플릿이 발견되었는지 확인합니다.",
+    "details": ["이 조건은 새 캡처를 기다리지 않습니다. 최신 결과가 없거나 오래되면 거짓으로 처리하고 진단을 남깁니다.", "탐지기, 영역, 프로파일을 고릅니다. 진입·이탈 임계값과 결과 유효 기간의 숫자 칸을 비우면 프로파일 값을 사용합니다.", "즉시 탐색이 필요하면 이미지 찾기를 앞에 연결하세요."],
+    "related": ["ms_vision_find", "ms_vision_wait"]
+  },
+  "ms_vision_color_find": {
+    "title": "HSV 색상 탐지",
+    "summary": "화면 영역에서 HSV 범위에 맞는 픽셀을 찾아 결과 변수에 저장합니다.",
+    "details": ["HSV Hue는 0~179, Saturation과 Value는 0~255 범위입니다. 하한·상한을 쉼표로 구분해 입력합니다.", "픽셀 수와 영역 대비 비율을 함께 만족하면 FOUND입니다. 결과 변수의 상태, 픽셀 수, 면적 비율을 확인하세요.", "빈 숫자 칸은 프로파일 또는 탐지기의 기본값을 따릅니다."],
+    "related": ["ms_vision_color_visible", "ms_vision_result", "ms_vision_wait"]
+  },
+  "ms_vision_color_visible": {
+    "title": "HSV 색상 보임",
+    "summary": "최근 관측에서 지정 HSV 범위가 ROI 기준 픽셀 수와 비율을 만족했는지 확인합니다.",
+    "details": ["조건은 새 프레임을 기다리지 않습니다. 최신 관측이 없거나 오래되면 거짓으로 처리하고 진단을 남깁니다.", "상태가 UNKNOWN인 이유와 픽셀 수, 면적 비율은 인식 결과 블록에서 읽을 수 있습니다."],
+    "related": ["ms_vision_color_find", "ms_vision_result"]
+  },
+  "ms_vision_result": {
+    "title": "인식 결과 값",
+    "summary": "이미지 찾기 또는 기다리기에서 저장한 결과의 좌표, 점수 또는 상태를 읽습니다.",
+    "details": ["X와 Y는 전역 물리 픽셀 좌표입니다. FOUND가 아닌 결과에서 좌표를 입력에 사용하지 마세요.", "점수는 템플릿 유사도 또는 HSV 면적 비율입니다. 오류 코드는 UNKNOWN 사유를 나타내며 픽셀 수와 면적 비율은 HSV 탐지 결과에 제공됩니다."],
+    "related": ["ms_vision_find", "ms_mouse_move_timed"]
+  },
+  "ms_on_image_appeared": {
+    "title": "이미지가 나타났을 때",
+    "summary": "연속 프레임에서 안정적으로 미검출에서 검출로 바뀌면 연결한 작업을 시작합니다.",
+    "details": ["프로파일의 안정 프레임 수와 쿨다운이 중복 실행을 제한합니다. UNKNOWN은 출현이나 소멸로 처리하지 않습니다.", "처음 캡처할 때 이미 이미지가 보이는 경우 실행 여부를 선택할 수 있습니다."],
+    "related": ["ms_on_image_disappeared", "ms_vision_find", "ms_vision_visible"]
+  },
+  "ms_on_image_disappeared": {
+    "title": "이미지가 사라졌을 때",
+    "summary": "연속 프레임에서 안정적으로 검출에서 미검출로 바뀌면 연결한 작업을 시작합니다.",
+    "details": ["UNKNOWN은 소멸로 처리하지 않습니다. 연결한 작업은 실행 중지, 우선순위, 조건 설정을 따릅니다."],
+    "related": ["ms_on_image_appeared", "ms_vision_wait"]
+  },
   "ms_target_window": {
     "title": "대상 창 상태",
     "summary": "실행 설정에서 선택한 대상 창의 현재 상태가 지정한 상태와 같으면 참을 반환합니다.",

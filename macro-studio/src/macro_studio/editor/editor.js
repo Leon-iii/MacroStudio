@@ -3,7 +3,7 @@
 const palette = {
   event: "#9a4a0e", input: "#2459a6", time: "#20646d", control: "#356843",
   data: "#70458c", variable: "#a63268", arithmetic: "#795600", logic: "#6440a3",
-  workflow: "#59607b", state: "#744756",
+  workflow: "#59607b", state: "#744756", screen: "#23627c",
 };
 const input = (name, text) => ({type: "field_input", name, text});
 const label = (name, text) => ({type: "field_label", name, text});
@@ -189,6 +189,14 @@ class MotionProfileField extends PropertyField {
 }
 Blockly.fieldRegistry.register("field_studio_motion_profile", MotionProfileField);
 
+let visionProfiles = [["프로젝트 기본값", "inherit"]];
+class VisionProfileField extends PropertyField {
+  static fromJson() {
+    return new VisionProfileField(() => visionProfiles);
+  }
+}
+Blockly.fieldRegistry.register("field_studio_vision_profile", VisionProfileField);
+
 const profiledMoveInputs = () => [
   value("POSITION", "Position"), value("DURATION", "Duration"), {type: "input_end_row"},
 ];
@@ -202,7 +210,8 @@ const profiledMoveOptions = {
 const batchEdge = {previousStatement: "BatchEdge", nextStatement: "BatchEdge", inputsInline: true};
 const batchOffset = () => number("OFFSET", 0, 0, 5000, 1);
 const batchAction = () => dropdown("ACTION", [["누르기", "down"], ["해제하기", "up"]]);
-const eventHats = new Set(["ms_start", "ms_hotkey", "ms_interval", "ms_custom"]);
+const eventHats = new Set(["ms_start", "ms_hotkey", "ms_interval", "ms_custom",
+  "ms_on_image_appeared", "ms_on_image_disappeared"]);
 
 Blockly.Extensions.register("studio_duration_default", function () {
   this.setFieldValue("sec", "UNIT");
@@ -298,6 +307,94 @@ Blockly.defineBlocksWithJsonArray([
     [value("POSITION", "Position"), value("WIDTH", "Number"), value("HEIGHT", "Number"), input("TEXT", "READY"),
      dropdown("LANGUAGE", [["영어", "eng"], ["한국어", "kor"], ["한국어+영어", "kor+eng"]])],
     "Boolean"), colour: "#23627c", inputsInline: true},
+  {...expression("vision_visible", "탐지기 %1 템플릿 %2 프로파일 %3 최신 결과에서 보이는가?",
+    [dropdown("DETECTOR", [["템플릿", "template"], ["HSV", "hsv"]]),
+     {type: "field_studio_image_asset", name: "IMAGE"},
+     {type: "field_studio_vision_profile", name: "PROFILE"}, input("MAX_AGE_MS", "")],
+    "Boolean"), message1: "ROI L %1 T %2 W %3 H %4 진입 %5 이탈 %6",
+    args1: [number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+      number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1),
+      input("ENTER_THRESHOLD", ""), input("EXIT_THRESHOLD", "")],
+    message2: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+    args2: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+      input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+    colour: "#23627c", inputsInline: true},
+  {...expression("vision_color_visible", "ROI의 HSV 색상 최신 결과에서 보이는가?",
+    [{type: "field_studio_vision_profile", name: "PROFILE"}, input("MAX_AGE_MS", "")],
+    "Boolean"), message1: "ROI L %1 T %2 W %3 H %4",
+    args1: [number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+      number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1)],
+    message2: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+    args2: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+      input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+    colour: "#23627c", inputsInline: true},
+  {...expression("vision_result", "결과 변수 %1 의 %2",
+    [propertyField("RESULT", "variable"), dropdown("FIELD", [["X", "x"], ["Y", "y"], ["점수", "score"],
+      ["상태", "status"], ["오류 코드", "error_code"], ["픽셀 수", "pixel_count"], ["면적 비율", "fraction"]])],
+    null), colour: "#23627c", inputsInline: true},
+  statement("vision_find", "screen", "템플릿 %1 찾기 결과 변수 %2 프로파일 %3 제한 시간 %4 ms",
+    [{type: "field_studio_image_asset", name: "IMAGE"}, propertyField("RESULT", "variable"),
+     {type: "field_studio_vision_profile", name: "PROFILE"}, number("TIMEOUT_MS", 1000, 1, 86400000, 1)],
+    {message1: "탐지기 %1 ROI L %2 T %3 W %4 H %5 진입 %6 이탈 %7 최대 결과 나이 %8 ms",
+     args1: [dropdown("DETECTOR", [["템플릿", "template"], ["HSV", "hsv"]]),
+       number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+       number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1),
+       input("ENTER_THRESHOLD", ""), input("EXIT_THRESHOLD", ""), input("MAX_AGE_MS", "")],
+     message2: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+     args2: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+       input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+     inputsInline: true}),
+  statement("vision_color_find", "screen", "HSV 색상 탐지 결과 변수 %1 프로파일 %2 제한 시간 %3 ms",
+    [propertyField("RESULT", "variable"), {type: "field_studio_vision_profile", name: "PROFILE"},
+     number("TIMEOUT_MS", 1000, 1, 86400000, 1)],
+    {message1: "ROI L %1 T %2 W %3 H %4 최대 결과 나이 %5",
+     args1: [number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+       number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1), input("MAX_AGE_MS", "")],
+     message2: "HSV 하한 %1 상한 %2 최소 픽셀 수 %3 최소 면적 비율 %4",
+     args2: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+       input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+     inputsInline: true}),
+  statement("vision_wait", "screen", "템플릿 %1 이 %2 할 때까지 기다려 결과 변수 %3 프로파일 %4 제한 시간 %5 ms 무한 %6",
+    [{type: "field_studio_image_asset", name: "IMAGE"}, dropdown("CONDITION", [["나타날", "appear"], ["사라질", "disappear"]]),
+     propertyField("RESULT", "variable"), {type: "field_studio_vision_profile", name: "PROFILE"},
+     number("TIMEOUT_MS", 5000, 1, 86400000, 1), dropdown("INFINITE", [["아니요", "FALSE"], ["예", "TRUE"]])],
+    {message1: "탐지기 %1 ROI L %2 T %3 W %4 H %5 진입 %6 이탈 %7 최대 결과 나이 %8",
+     args1: [
+      dropdown("DETECTOR", [["템플릿", "template"], ["HSV", "hsv"]]),
+      number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+      number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1),
+      input("ENTER_THRESHOLD", ""), input("EXIT_THRESHOLD", ""), input("MAX_AGE_MS", "")],
+     message2: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+     args2: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+       input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+     inputsInline: true}),
+  hat("on_image_appeared", "event", "템플릿 %1 이 나타났을 때 프로파일 %2 초기 표시 실행 %3 우선순위 %4 조건 %5",
+    [{type: "field_studio_image_asset", name: "IMAGE"}, {type: "field_studio_vision_profile", name: "PROFILE"},
+     dropdown("FIRE_ON_INITIAL_PRESENT", [["무시", "FALSE"], ["실행", "TRUE"]]), policy(), priority(),
+     value("GUARD", "Boolean")],
+    {message1: "%1", args1: [stack("BODY")],
+     message2: "탐지기 %1 ROI L %2 T %3 W %4 H %5 진입 %6 이탈 %7 최대 결과 나이 %8",
+     args2: [dropdown("DETECTOR", [["템플릿", "template"], ["HSV", "hsv"]]),
+       number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+       number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1),
+       input("ENTER_THRESHOLD", ""), input("EXIT_THRESHOLD", ""), input("MAX_AGE_MS", "")],
+     message3: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+     args3: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+       input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+     inputsInline: true, nextStatement: null}),
+  hat("on_image_disappeared", "event", "템플릿 %1 이 사라졌을 때 프로파일 %2 우선순위 %3 조건 %4",
+    [{type: "field_studio_image_asset", name: "IMAGE"}, {type: "field_studio_vision_profile", name: "PROFILE"},
+     policy(), priority(), value("GUARD", "Boolean")],
+    {message1: "%1", args1: [stack("BODY")],
+     message2: "탐지기 %1 ROI L %2 T %3 W %4 H %5 진입 %6 이탈 %7 최대 결과 나이 %8",
+     args2: [dropdown("DETECTOR", [["템플릿", "template"], ["HSV", "hsv"]]),
+       number("ROI_LEFT", 0, 0, 32767, 1), number("ROI_TOP", 0, 0, 32767, 1),
+       number("ROI_WIDTH", 0, 0, 32768, 1), number("ROI_HEIGHT", 0, 0, 32768, 1),
+       input("ENTER_THRESHOLD", ""), input("EXIT_THRESHOLD", ""), input("MAX_AGE_MS", "")],
+     message3: "HSV 하한 %1 상한 %2 픽셀 수 %3 면적 비율 %4",
+     args3: [input("HSV_LOWER", "0,0,0"), input("HSV_UPPER", "179,255,255"),
+       input("MIN_PIXEL_COUNT", ""), input("MIN_FRACTION", "")],
+     inputsInline: true, nextStatement: null}),
   hat("workflow", "workflow", "%1 반환 타입 %2",
     [input("NAME", "작업"), dropdown("RETURNS", [["없음", "void"], ...valueTypes])],
     {message1: "매개변수 %1", args1: [workflowList("PARAMS", "ParameterList")],
@@ -336,6 +433,8 @@ const categories = [
   ["산술 연산", "arithmetic", ["number", "arithmetic", "random_float"]],
   ["논리 연산", "logic", ["boolean", "comparison", "logical", "not"]],
   ["화면 센서", "screen", ["pixel_color", "region_image", "region_text", "target_window"]],
+  ["이미지 인식", "screen", ["vision_find", "vision_wait", "vision_visible", "vision_result",
+    "vision_color_find", "vision_color_visible", "on_image_appeared", "on_image_disappeared"]],
   ["워크플로", "workflow", ["workflow", "param_def", "parameter", "call", "call_store", "call_if", "return"]],
   ["상태 머신", "state", ["state", "state_condition", "state_hotkey"]],
 ];
@@ -372,6 +471,14 @@ const toolboxInputs = {
   pixel_color: {POSITION: defaultPosition},
   region_image: defaultRegion,
   region_text: defaultRegion,
+  vision_find: {},
+  vision_color_find: {},
+  vision_color_visible: {},
+  vision_wait: {},
+  vision_visible: {},
+  vision_result: {},
+  on_image_appeared: {GUARD: booleanShadow(true)},
+  on_image_disappeared: {GUARD: booleanShadow(true)},
   repeat: {COUNT: numberShadow(1)},
   while: inactiveCondition,
   if_only: inactiveCondition,
@@ -811,7 +918,19 @@ new QWebChannel(qt.webChannelTransport, channel => {
     imageAssetOptions = [["이미지 선택", ""], ...options];
     for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
       for (const block of editor.getAllBlocks(false)) {
-        if (block.type === "ms_region_image") block.getField("IMAGE").refreshAssets();
+        if (["ms_region_image", "ms_vision_find", "ms_vision_wait", "ms_vision_visible",
+             "ms_on_image_appeared", "ms_on_image_disappeared"].includes(block.type)) {
+          block.getField("IMAGE")?.refreshAssets();
+        }
+      }
+    }
+  });
+  bridge.visionProfilesChanged.connect(data => {
+    visionProfiles = [["프로젝트 기본값", "inherit"], ...JSON.parse(data)];
+    for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
+      for (const block of editor.getAllBlocks(false)) {
+        const field = block.getField("PROFILE");
+        if (field instanceof VisionProfileField) field.refreshOptions();
       }
     }
   });

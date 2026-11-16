@@ -1,10 +1,11 @@
 from .ir import PARAM_PREFIX, SCREEN_SENSOR_OPS, VISION_EVENTS, ValidationError, normalize_hotkey, validate_program
 from .mouse_motion import BUILTIN_PROFILES, DEFAULT_PROFILE
 from .mouse_motion.registry import project_motion_profiles
-from .vision_profiles import resolve_profile
+from .vision_profiles import DEFAULT_PROFILE as DEFAULT_VISION_PROFILE, resolve_profile
 
 
-def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profiles=None):
+def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profiles=None,
+                    application_vision_profile=DEFAULT_VISION_PROFILE):
     workspace = project["workspace"]
     workflows = {}
     handlers = []
@@ -23,18 +24,26 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
         connection = block.get("inputs", {}).get(name, {})
         return connection.get("block") or connection.get("shadow")
 
-    def vision_detector(block):
+    def vision_detector(block, *, detector=None):
         nonlocal version
         version = 3
-        detector = field(block, "DETECTOR") or "template"
+        detector = detector or field(block, "DETECTOR") or "template"
         image = field(block, "IMAGE") if detector == "template" else None
         if detector == "template" and (not isinstance(image, str) or image not in project.get("image_assets", {})):
             fail(block, "프로젝트에 등록된 기준 이미지를 선택하세요.")
         ref = field(block, "PROFILE") or "inherit"
         overrides = {}
-        for name in ("enter_threshold", "exit_threshold", "max_age_ms", "min_pixel_count", "min_fraction"):
+        for name, parse in (("enter_threshold", float), ("exit_threshold", float), ("max_age_ms", int),
+                            ("min_pixel_count", int), ("min_fraction", float)):
             value = field(block, name.upper())
-            if value is not None and value != "":
+            if isinstance(value, str):
+                if not value.strip():
+                    continue
+                try:
+                    value = parse(value)
+                except ValueError:
+                    fail(block, f"{name}에 숫자를 입력하세요.")
+            if value is not None:
                 overrides[name] = value
         if detector == "hsv":
             for name in ("hsv_lower", "hsv_upper"):
@@ -48,7 +57,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
         if roi["width"] or roi["height"] or roi["left"] or roi["top"]:
             overrides["roi"] = roi
         try:
-            spec = resolve_profile(project, ref, image, overrides)
+            spec = resolve_profile(project, ref, image, overrides, application_profile=application_vision_profile)
         except ValueError as error:
             fail(block, str(error))
         spec = {**spec, "detector": detector}
@@ -86,8 +95,8 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
             return {"op": "not", "args": [expression(value, "VALUE", False)]}
         if kind == "target_window":
             return {"op": kind, "state": field(value, "STATE")}
-        if kind == "vision_visible":
-            return {"op": kind, **vision_detector(value)}
+        if kind in ("vision_visible", "vision_color_visible"):
+            return {"op": "vision_visible", **vision_detector(value, detector="hsv" if kind == "vision_color_visible" else None)}
         if kind == "vision_result":
             version = 3
             return {"op": kind, "block_id": value["id"], "result_var": field(value, "RESULT"),
@@ -219,8 +228,12 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                         motion={"profile_ref": ref, "profile": profile.to_dict(),
                                 "duration": duration_value(block) if child(block, "DURATION") else None},
                     )
-                case "vision_find" | "vision_wait":
-                    step.update(vision_detector(block), result_var=field(block, "RESULT"))
+                case "vision_find" | "vision_wait" | "vision_color_find":
+                    if kind == "vision_color_find":
+                        step.update(vision_detector(block, detector="hsv"), op="vision_find")
+                    else:
+                        step.update(vision_detector(block))
+                    step["result_var"] = field(block, "RESULT")
                     timeout = field(block, "TIMEOUT_MS")
                     if kind == "vision_wait" and field(block, "INFINITE") in (True, "TRUE"):
                         step["timeout_ms"] = None

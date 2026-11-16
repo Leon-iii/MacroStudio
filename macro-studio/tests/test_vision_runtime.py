@@ -307,6 +307,44 @@ def test_compiler_preserves_vision_identity_and_validates_hsv_and_image():
         compile_project(project)
 
 
+def test_compiler_uses_application_recognition_profile_unless_block_overrides():
+    fields = {"IMAGE": "asset:target", "RESULT": "target", "ENTER_THRESHOLD": "", "EXIT_THRESHOLD": " ",
+              "MAX_AGE_MS": ""}
+    start = {"id": "start", "type": "ms_start", "next": {"block": {
+        "id": "find", "type": "ms_vision_find", "fields": fields,
+    }}}
+    project = {"project_id": "vision", "workspace": {"blocks": {"blocks": [start]}},
+               "image_assets": {"asset:target": {}}}
+
+    def effective(profile):
+        code, _ = compile_project(project, application_vision_profile=profile)
+        return next(vision_nodes(code))["spec"]
+
+    strict = effective("builtin.strict")
+    flexible = effective("builtin.flexible")
+    assert (strict["enter_threshold"], strict["exit_threshold"]) == (0.95, 0.88)
+    assert (flexible["enter_threshold"], flexible["exit_threshold"]) == (0.82, 0.75)
+    fields.update(ENTER_THRESHOLD="0.91", EXIT_THRESHOLD=0.83, MAX_AGE_MS="400")
+    overridden = effective("builtin.strict")
+    assert (overridden["enter_threshold"], overridden["exit_threshold"], overridden["max_age_ms"]) == (0.91, 0.83, 400)
+
+
+def test_compiler_hsv_aliases_use_existing_vision_ops():
+    hsv = {"DETECTOR": "template", "HSV_LOWER": "165,60,60", "HSV_UPPER": "15,255,255"}
+    visible = {"id": "visible", "type": "ms_vision_color_visible", "fields": hsv}
+    find = {"id": "find", "type": "ms_vision_color_find", "fields": {**hsv, "RESULT": "target"}}
+    branch = {"id": "if", "type": "ms_if_only", "inputs": {"CONDITION": {"block": visible}, "THEN": {"block": find}}}
+    start = {"id": "start", "type": "ms_start", "next": {"block": branch}}
+    project = {"project_id": "vision", "workspace": {"blocks": {"blocks": [start]}}}
+
+    code, detached = compile_project(project)
+
+    assert detached == []
+    assert [(node["block_id"], node["op"], node["spec"]["detector"]) for node in vision_nodes(code)] == [
+        ("visible", "vision_visible", "hsv"), ("find", "vision_find", "hsv"),
+    ]
+
+
 def test_runner_requires_explicit_consent_before_materializing_assets(tmp_path):
     code = program([command(spec={"detector": "template", "image": "asset:target"})])
     spec = next(vision_nodes(code))["spec"]

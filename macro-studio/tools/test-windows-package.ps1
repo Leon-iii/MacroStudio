@@ -1,10 +1,14 @@
 ﻿param(
     [string] $Package = "$PSScriptRoot/../dist/MacroStudio",
     [switch] $RequireNoPython,
-    [switch] $MotionShowcase
+    [switch] $MotionShowcase,
+    [switch] $VisionShowcase
 )
 
 $ErrorActionPreference = "Stop"
+if ($MotionShowcase -and $VisionShowcase) {
+    throw "Select one showcase."
+}
 if ($RequireNoPython) {
     if (Get-Command python, python3, py -ErrorAction SilentlyContinue |
         Where-Object { $_.Source -notlike '*\Microsoft\WindowsApps\*' }) {
@@ -95,25 +99,41 @@ function Enter-Path($Title, $Path) {
         $child = Named $window $Title
         if ($child) { $child } else { Named $root $Title $findChildren }
     }
-    $controls = Wait-For "file dialog controls" {
+    $edit = Wait-For "file name field" {
         $all = $dialog.FindAll($findDescendants, [Windows.Automation.Condition]::TrueCondition)
-        $accept = $all | Where-Object {
-            $_.Current.AutomationId -eq "1" -and $_.Current.Name -match '^(열기|저장|Open|Save)'
-        } | Select-Object -First 1
         $value = $null
         foreach ($control in $all) {
             if ($control.Current.ControlType.Id -eq [Windows.Automation.ControlType]::Edit.Id -and
-                $control.Current.Name -match '파일 이름|File name' -and
+                ($control.Current.AutomationId -eq "1148" -or $control.Current.Name -match '파일 이름|File name') -and
                 $control.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$value)) {
-                break
+                return $value
             }
         }
-        if ($value -and $accept) { @{ Value = $value; Accept = $accept } }
     }
-    $controls.Value.SetValue($Path)
-    if (-not [MacroStudioTestWindow]::PostMessage([IntPtr]$controls.Accept.Current.NativeWindowHandle,
+    $edit.SetValue($Path)
+    $accept = Wait-For "file dialog submit button" {
+        $condition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::AutomationIdProperty, "1")
+        $button = $dialog.FindFirst($findDescendants, $condition)
+        if ($button -and $button.Current.IsEnabled -and $button.Current.NativeWindowHandle) { $button }
+    }
+    if (-not [MacroStudioTestWindow]::PostMessage([IntPtr]$accept.Current.NativeWindowHandle,
                                                 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) {
         throw "Cannot submit the file dialog."
+    }
+}
+
+function Execution-Log {
+    $condition = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::NameProperty, "실행 로그")
+    foreach ($log in $window.FindAll($findDescendants, $condition)) {
+        $pattern = $null
+        if ($log.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
+            $pattern.DocumentRange.GetText(-1)
+        }
+        if ($log.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+            $pattern.Current.Value
+        }
     }
 }
 
@@ -121,7 +141,9 @@ $packageRoot = (Resolve-Path -LiteralPath $Package).Path
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("MacroStudio-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $original = Join-Path $scratch "original.macroproj"
-$example = if ($MotionShowcase) { "mouse_motion_showcase.macroproj" } else { "mixed-loop.macroproj" }
+$example = if ($VisionShowcase) { "vision-find-click.macroproj" }
+    elseif ($MotionShowcase) { "mouse_motion_showcase.macroproj" }
+    else { "mixed-loop.macroproj" }
 Copy-Item -LiteralPath (Join-Path $packageRoot "examples/$example") $original
 $sourceProject = Get-Content -Raw -Encoding utf8 -LiteralPath $original | ConvertFrom-Json
 
@@ -160,6 +182,23 @@ try {
         $saved.workspace.blocks.blocks[0].next.block.next.block.fields.PROFILE -ne "builtin.direct")) {
         throw "Saved project did not retain its motion profiles."
     }
+    if ($VisionShowcase) {
+        $finder = $saved.workspace.blocks.blocks[0].next.block
+        $imageId = $finder.fields.IMAGE
+        if ($finder.type -ne "ms_vision_find" -or -not $imageId -or
+            $saved.image_assets.PSObject.Properties[$imageId].Value.png -ne
+            $sourceProject.image_assets.PSObject.Properties[$imageId].Value.png) {
+            throw "Saved project did not retain the template and its block reference."
+        }
+        (Button $window "검증").GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Wait-For "compiled vision project" {
+            $text = (Execution-Log) -join "`n"
+            if ($text -match '검증 실패') { throw "Runner log: $text" }
+            $text -match '검증 완료'
+        } | Out-Null
+        "PASS: packaged editor opened, saved and compiled the vision project"
+        return
+    }
     $action = Button $window "시작"
     $action.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     $runner = Wait-For "separate bundled Runner" {
@@ -175,20 +214,10 @@ try {
         } | Out-Null
     }
     Wait-For "dry-run input counters" {
-        $condition = [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::NameProperty, "실행 로그")
-        foreach ($log in $window.FindAll($findDescendants, $condition)) {
-            $pattern = $null
-            $text = if ($log.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
-                $pattern.DocumentRange.GetText(-1)
-            }
-            if ($log.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
-                $text += $pattern.Current.Value
-            }
-            if ($MotionShowcase -and $text -match '이동 · 마우스 X 360 Y 140') { return $true }
-            if (-not $MotionShowcase -and $text -match '누름 · scan:' -and $text -match '해제 · scan:') { return $true }
-            if ($text -match 'Runner 연결이 끊겼습니다|검증 실패') { throw "Runner log: $text" }
-        }
+        $text = (Execution-Log) -join "`n"
+        if ($MotionShowcase -and $text -match '이동 · 마우스 X 360 Y 140') { return $true }
+        if (-not $MotionShowcase -and $text -match '누름 · scan:' -and $text -match '해제 · scan:') { return $true }
+        if ($text -match 'Runner 연결이 끊겼습니다|검증 실패') { throw "Runner log: $text" }
     } | Out-Null
     if (-not $MotionShowcase) {
         $stop = Button $window "정지"
