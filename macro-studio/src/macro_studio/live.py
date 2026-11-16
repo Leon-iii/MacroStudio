@@ -9,7 +9,7 @@ from time import perf_counter_ns, sleep
 from .adaptive import device_steps
 from .external_hid.backend import HidBackend, key_usage
 from .external_hid.serial_link import open_port
-from .ir import DEFAULT_STOP_HOTKEY
+from .ir import DEFAULT_STOP_HOTKEY, vision_nodes
 from .output import (
     DESKTOP_CAPABILITIES, SENDINPUT_PROFILE, HidMode, OutputKind, OutputProfile,
     OutputRoute, OutputRouter, RunConfig,
@@ -85,7 +85,9 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
              stop_hotkey: str = DEFAULT_STOP_HOTKEY, metrics: bool = False,
              status=print, clock=None, control=None, on_state=None, on_runtime=None,
              hid_port: str | None = None, hid_onboard: bool = False,
-             hid_mode: HidMode | str | None = None) -> dict:
+             hid_mode: HidMode | str | None = None, perception=None) -> dict:
+    if perception is None and next(vision_nodes(program), None) is not None:
+        raise ValueError("run this recognition program from the editor with screen capture enabled")
     clock = DeadlineClock() if clock is None else clock
     routes = {OutputKind.SENDINPUT: OutputRoute(DESKTOP_CAPABILITIES, lambda: desktop)}
     profile = SENDINPUT_PROFILE
@@ -236,7 +238,7 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             if not desktop.point_over(target, position):
                 raise TaskFault("pointer_outside_target", "destination must be over the target window")
 
-        runtime = Runtime(live_program, clock, session.backend)
+        runtime = Runtime(live_program, clock, session.backend, perception=perception)
         if hid is None and program["ir_version"] >= 2:
             runtime.send_profiled_move = desktop.send_mouse_absolute
         runtime.before_press = before_press

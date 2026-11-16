@@ -1,11 +1,14 @@
+from contextlib import ExitStack
 import json
 from io import FileIO
+from pathlib import Path
 from queue import Empty, Full, Queue
 import sys
 from threading import Thread
 from time import perf_counter_ns, sleep
 
 from .backend import FakeInputBackend
+from .ir import vision_nodes
 from .live import DeadlineClock, run_live
 from .output import FAKE_CAPABILITIES, FAKE_PROFILE, OutputKind, OutputRoute, OutputRouter, RunConfig
 from .runtime import Runtime
@@ -18,6 +21,28 @@ ACTIVE_BLOCK_UPDATE_NS = 33_000_000
 
 def emit(kind, **data):
     print(json.dumps({"kind": kind, **data}, ensure_ascii=True), flush=True)
+
+
+def open_perception(program, config):
+    nodes = list(vision_nodes(program))
+    if not nodes or config.get("vision_capture") is not True:
+        return None
+    from .perception import PerceptionService
+
+    images = config.get("image_assets", {})
+    templates = [node for node in nodes if node.get("spec", {}).get("detector") == "template"]
+    mapped = [Path(images[node["spec"]["image"]]).resolve() for node in templates if node["spec"]["image"] in images]
+    base = mapped[0].parent if mapped else Path(config.get("project_directory", ".")).resolve()
+    for node in templates:
+        image = node["spec"]["image"]
+        if image.startswith("asset:") and image not in images:
+            raise ValueError(f"({node['block_id']}) 등록된 인식 이미지를 읽을 수 없습니다.")
+        path = (base / images.get(image, image)).resolve()
+        if not path.is_relative_to(base) or not path.is_file():
+            raise ValueError(f"({node['block_id']}) 인식 이미지가 없거나 프로젝트 경로 밖에 있습니다.")
+        node["spec"]["image"] = path.relative_to(base).as_posix()
+    return PerceptionService(base, source_id=config.get("vision_source", "monitor.1"),
+                             target_fps=config.get("vision_fps", 30))
 
 
 class DryBackend(FakeInputBackend):
@@ -95,12 +120,14 @@ def main():
     closed = False
     runtime = None
     reported = 0
+    warned = 0
     counts = dict(pressed=0, released=0)
     next_update = last_seen
     next_active_update = last_seen
     active_blocks = ()
     running = False
     sensors = None
+    services = ExitStack()
     sensor_errors = Queue(maxsize=32)
 
     def report_sensor(key, message):
@@ -126,7 +153,7 @@ def main():
         engine.observe_input = observe
 
     def publish():
-        nonlocal reported
+        nonlocal reported, warned
         for _ in range(32):
             try:
                 key, message = sensor_errors.get_nowait()
@@ -137,7 +164,10 @@ def main():
             return
         for error in runtime.errors[reported:]:
             emit("error", **error)
+        for warning in runtime.warnings[warned:]:
+            emit("log", message=f"이미지 인식 · {warning['block_id']} · {warning['message']}")
         reported = len(runtime.errors)
+        warned = len(runtime.warnings)
         emit("stats", **counts, errors=reported, missed=runtime.missed_ticks)
 
     def read_commands():
@@ -207,7 +237,10 @@ def main():
             sensors = ScreenSensors(
                 specs, config.get("project_directory", "."), report_sensor,
             )
-            sensors.__enter__()
+            services.enter_context(sensors)
+        perception = open_perception(program, config)
+        if perception is not None:
+            services.enter_context(perception)
         # Launch the sensor process before reading from Qt's stdin pipe on Windows.
         last_seen = perf_counter_ns()
         Thread(target=read_commands, daemon=True).start()
@@ -219,7 +252,7 @@ def main():
                               status=lambda message: emit("log", message=message),
                               control=command, on_state=state, on_runtime=attach,
                               hid_port=config.get("hid_port"), hid_onboard=config.get("hid_onboard") is True,
-                              hid_mode=config.get("hid_mode"))
+                              hid_mode=config.get("hid_mode"), perception=perception)
             errors = result["errors"]
         else:
             debugging = config.get("debug") is True
@@ -228,7 +261,7 @@ def main():
             backend = DryBackend(clock)
             router = OutputRouter({OutputKind.FAKE: OutputRoute(FAKE_CAPABILITIES, lambda: backend)})
             session = router.bind(program, RunConfig(FAKE_PROFILE))
-            runtime = Runtime(program, clock, session.backend)
+            runtime = Runtime(program, clock, session.backend, perception=perception, perception_now=perf_counter_ns)
             if config.get("query_target"):
                 from .win32 import WindowsDesktop
 
@@ -267,8 +300,7 @@ def main():
         emit("error", message=str(error))
         state("ERROR")
     finally:
-        if sensors is not None:
-            sensors.__exit__()
+        services.close()
 
 
 if __name__ == "__main__":

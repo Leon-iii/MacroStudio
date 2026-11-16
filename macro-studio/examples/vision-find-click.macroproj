@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "project_id": "v1-3-vision-find-click",
+  "name": "이미지 찾기와 클릭",
+  "globals": {},
+  "image_assets": {
+    "asset:vision-demo-target": {
+      "name": "예제 확인 버튼",
+      "png": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAcCAIAAACoDqudAAAA2ElEQVR4nOXXwQrDIAwAUJX+yfJT26148Y/WS9mtX5WPGUg30q2VmegSaA6F4iGPaMT4y/XuLMVAf+KYVBDzY9oBxTHRhX9GJKmDusblCr03J6hrPkxrhexEcGcD4ZIMgTBrqkwdQUgcv5t6gXArgNukCUKupgsIBRoOCIunQaipBmGxa+SaOhAWu6aJpg4E2xwFH1tTvWWwZ2qo4RxqOK6TXMNsezjIKtfw7yH4yt1EI7oYIQvoVxnkOmisPtBm8sbWivh6168V0jVFMmV4OrlaGBS9tVH6CeBmZnNPFIvYAAAAAElFTkSuQmCC",
+      "source": "import"
+    }
+  },
+  "output_profile": {
+    "output_kind": "fake"
+  },
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": [
+        {
+          "type": "ms_hotkey",
+          "id": "vision-hotkey",
+          "x": 70,
+          "y": 60,
+          "fields": {
+            "KEY": "Ctrl+F6"
+          },
+          "next": {
+            "block": {
+              "type": "ms_vision_find",
+              "id": "vision-find",
+              "fields": {
+                "DETECTOR": "template",
+                "IMAGE": "asset:vision-demo-target",
+                "PROFILE": "inherit",
+                "RESULT": "target",
+                "TIMEOUT_MS": 1000,
+                "MAX_AGE_MS": 1000
+              },
+              "next": {
+                "block": {
+                  "type": "ms_if_only",
+                  "id": "vision-found-only",
+                  "inputs": {
+                    "CONDITION": {
+                      "block": {
+                        "type": "ms_comparison",
+                        "id": "vision-is-found",
+                        "fields": {
+                          "OP": "eq"
+                        },
+                        "inputs": {
+                          "A": {
+                            "block": {
+                              "type": "ms_vision_result",
+                              "id": "check-status",
+                              "fields": {
+                                "RESULT": "target",
+                                "FIELD": "status"
+                              }
+                            }
+                          },
+                          "B": {
+                            "block": {
+                              "type": "ms_text",
+                              "id": "vision-found",
+                              "fields": {
+                                "VALUE": "FOUND"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "THEN": {
+                      "block": {
+                        "type": "ms_mouse_move_timed",
+                        "id": "vision-natural",
+                        "fields": {
+                          "PROFILE": "builtin.natural"
+                        },
+                        "inputs": {
+                          "POSITION": {
+                            "block": {
+                              "type": "ms_position",
+                              "id": "move-position",
+                              "inputs": {
+                                "X": {
+                                  "block": {
+                                    "type": "ms_vision_result",
+                                    "id": "move-x",
+                                    "fields": {
+                                      "RESULT": "target",
+                                      "FIELD": "x"
+                                    }
+                                  }
+                                },
+                                "Y": {
+                                  "block": {
+                                    "type": "ms_vision_result",
+                                    "id": "move-y",
+                                    "fields": {
+                                      "RESULT": "target",
+                                      "FIELD": "y"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "next": {
+                          "block": {
+                            "type": "ms_mouse_click_at",
+                            "id": "vision-click",
+                            "fields": {
+                              "BUTTON": "left"
+                            },
+                            "inputs": {
+                              "POSITION": {
+                                "block": {
+                                  "type": "ms_position",
+                                  "id": "click-position",
+                                  "inputs": {
+                                    "X": {
+                                      "block": {
+                                        "type": "ms_vision_result",
+                                        "id": "click-x",
+                                        "fields": {
+                                          "RESULT": "target",
+                                          "FIELD": "x"
+                                        }
+                                      }
+                                    },
+                                    "Y": {
+                                      "block": {
+                                        "type": "ms_vision_result",
+                                        "id": "click-y",
+                                        "fields": {
+                                          "RESULT": "target",
+                                          "FIELD": "y"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

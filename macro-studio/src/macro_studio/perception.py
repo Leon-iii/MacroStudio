@@ -641,7 +641,10 @@ def _perception_worker(base, source_id, target_fps, backend_factory, session_id,
             else:
                 health = capture_error
             if health != last_health:
-                pending.append(_Message("health", 0, session_id, health))
+                invalidated_at = perf_counter_ns() if (
+                    frame is None and len(invalid_regions) != len(specs) and health[0] != "NO_NEW_FRAME"
+                ) else None
+                pending.append(_Message("health", 0, session_id, (*health, invalidated_at)))
                 last_health = health
             results = {}
 
@@ -712,6 +715,7 @@ class PerceptionService:
         self._latest_pending = {}
         self._latest_results = OrderedDict()
         self._capture_health = None, None
+        self._invalidated_at_ns = -1
         self._started = False
         self._closed = False
 
@@ -789,7 +793,10 @@ class PerceptionService:
                     self._dropped_events += 1
                 self._events.append(value)
             elif kind == "health":
-                self._capture_health = value
+                code, detail, invalidated_at = value
+                self._capture_health = code, detail
+                if invalidated_at is not None:
+                    self._invalidated_at_ns = invalidated_at
         for identifier in tuple(self._removing):
             if not self._send("unsubscribe", identifier):
                 break
@@ -819,7 +826,7 @@ class PerceptionService:
         if result is None:
             return None
         del self._requests[request_id]
-        return _fresh(result, spec.max_age_ms)
+        return self._current_result(result, spec)
 
     def cancel(self, request_id: int) -> None:
         self._requests.pop(request_id, None)
@@ -848,9 +855,24 @@ class PerceptionService:
         while self._events:
             event = self._events.popleft()
             spec = self._subscriptions.get(event["subscription_id"])
-            if spec and self._alive() and _fresh(event["result"], spec.max_age_ms).status != RecognitionStatus.UNKNOWN:
+            if spec and self._current_result(event["result"], spec).status != RecognitionStatus.UNKNOWN:
                 events.append(event)
         return events
+
+    def _is_current(self, result):
+        return (self._alive() and result.source_id == self.source_id and result.captured_at_ns is not None
+                and result.captured_at_ns > self._invalidated_at_ns)
+
+    def is_current(self, result):
+        self._poll()
+        return self._is_current(result)
+
+    def _current_result(self, result, spec):
+        if result.status != RecognitionStatus.UNKNOWN and not self._is_current(result):
+            code, detail = self._capture_health
+            return _unknown(self.source_id, spec, code or "SOURCE_INVALIDATED",
+                            detail or "The observation predates a capture failure.")
+        return _fresh(result, spec.max_age_ms)
 
     def _worker_unavailable(self, spec):
         return _unknown(self.source_id, spec, "PERCEPTION_UNAVAILABLE", "The perception worker is not running.")
@@ -871,10 +893,11 @@ class PerceptionService:
         if not self._alive():
             return self._worker_unavailable(config)
         result = self._latest_results.get(config)
-        fresh = _fresh(result, config.max_age_ms) if result is not None else None
+        fresh = self._current_result(result, config) if result is not None else None
         if config in self._latest_pending:
             return fresh
         if (result is None or fresh.error_code == "STALE_RESULT" or
+                (result.status != RecognitionStatus.UNKNOWN and fresh.status == RecognitionStatus.UNKNOWN) or
                 perf_counter_ns() - result.processed_at_ns >= config.scan_interval_ms * NS_PER_MS):
             identifier = self._request(config)
             if identifier is not None:

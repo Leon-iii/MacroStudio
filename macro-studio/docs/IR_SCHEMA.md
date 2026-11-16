@@ -2,6 +2,17 @@
 
 파일은 UTF-8 JSON입니다. 최상위 필드는 `ir_version`(정수 1), `project_id`(비어 있지 않은 문자열), `workflows`(객체), `handlers`(배열)입니다. `globals`는 전역 변수 이름과 초기값을 담는 객체이며 기본값은 빈 객체입니다.
 
+이미지 인식 블록이 있는 프로젝트는 `ir_version: 3`을 사용합니다. 기존 IR 1과 모션 프로파일의 IR 2도 읽습니다.
+
+## IR 3 시각 인식
+
+- `vision_find`와 `vision_wait`는 `spec`, `block_id`, `result_var`, `timeout_ms`를 사용합니다. `vision_wait`는 `condition`에 `appear` 또는 `disappear`를 받습니다. `timeout_ms: null`은 무한 대기를 뜻하며 STOP으로 취소할 수 있습니다.
+- `spec.detector`는 `template` 또는 `hsv`입니다. 템플릿 검색에는 `spec.image`가 필요합니다. `spec.roi`의 `left`, `top`, `width`, `height`는 캡처 소스 기준 물리 픽셀입니다.
+- `vision_visible`은 같은 검출 설정으로 최신 관측을 검사하는 불리언 식입니다. `vision_result`는 `result_var`와 `field`로 같은 Task의 `x`, `y`, `score`, `status`, `error_code`, `pixel_count`, `fraction`을 읽습니다.
+- `event.type`이 `on_image_appeared` 또는 `on_image_disappeared`인 핸들러는 감시할 `spec`을 갖습니다. 우선순위와 재진입은 일반 이벤트 핸들러와 같습니다.
+
+## 워크플로와 핸들러
+
 각 워크플로는 이름으로 참조하며 `steps` 배열을 가집니다. 각 핸들러는 고유한 `id`, `workflow_id`, `event`를 가집니다. 이벤트는 `{"type":"project_start"}` 또는 `{"type":"hotkey_pressed","hotkey":"F7"}`입니다. 선택 필드는 불리언 식 `guard`, 정수 `priority`(기본값 0), 불리언 `enabled`(기본값 true), `policy`입니다. 정책은 `ignore_if_running`(기본값), `restart`, `queue`, `parallel`, `override`를 지원합니다. 우선순위는 숫자가 클수록 높습니다.
 
 ## 명령

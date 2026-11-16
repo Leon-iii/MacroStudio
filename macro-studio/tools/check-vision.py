@@ -54,6 +54,7 @@ def capture(source, seconds, fps, roi):
 
 
 def recognize(count):
+    import cv2
     import numpy as np
 
     rng = np.random.default_rng(286)
@@ -61,7 +62,7 @@ def recognize(count):
     template = screen[25:49, 100:127].copy()
     matcher = TemplateMatcher()
     frame = CapturedFrame(1, screen, -200, 0, perf_counter_ns(), "static", 200, 200)
-    spec = {"detector": "template", "enter_threshold": 0.90}
+    spec = {"detector": "template", "enter_threshold": 0.90, "max_age_ms": 60_000}
     samples = []
     errors = []
     for _ in range(count):
@@ -70,7 +71,8 @@ def recognize(count):
         samples.append(perf_counter_ns() - started)
         if result.status != "FOUND" or result.bbox != (-100, 25, 27, 24):
             errors.append({"status": result.status, "bbox": result.bbox})
-    return {"attempts": count, "matches": count - len(errors), "detection": summary(samples), "errors": errors}
+    return {"attempts": count, "matches": count - len(errors), "opencv": cv2.__version__,
+            "detection": summary(samples), "errors": errors}
 
 
 def main():

@@ -13,6 +13,10 @@ MAX_BATCH_US = 5_000_000
 DURATION_UNIT_NS = {"ms": 1_000_000, "sec": 1_000_000_000, "min": 60_000_000_000}
 DEFAULT_STOP_HOTKEY = "CTRL+ALT+SHIFT+F11"
 SCREEN_SENSOR_OPS = ("pixel_color", "region_image", "region_text")
+VISION_COMMANDS = ("vision_find", "vision_wait")
+VISION_EVENTS = ("on_image_appeared", "on_image_disappeared")
+VISION_FIELDS = {"x": int, "y": int, "score": int, "status": str, "error_code": str,
+                 "pixel_count": int, "fraction": int}
 SENSOR_COORDINATES = {"x": (-32768, 32767), "y": (-32768, 32767)}
 SENSOR_REGION = {**SENSOR_COORDINATES, "width": (1, 1024), "height": (1, 1024)}
 OCR_LANGUAGES = ("eng", "kor", "kor+eng")
@@ -97,6 +101,16 @@ def _expression(value: object, variables: dict, path: str, depth: int = 0) -> ty
         if value.get("state") not in ("foreground", "exists", "minimized"):
             raise ValidationError(f"{path}: invalid target window state")
         return bool
+    if op == "vision_visible":
+        _vision_spec(value, path)
+        return bool
+    if op == "vision_result":
+        location = f"{path} ({_name(value.get('block_id'), path)})"
+        _name(value.get("result_var"), location)
+        field = value.get("field")
+        if field not in tuple(VISION_FIELDS):
+            raise ValidationError(f"{location}: invalid recognition result field")
+        return VISION_FIELDS[field]
     if op in SCREEN_SENSOR_OPS:
         label = f"{path} ({_name(value.get('block_id'), path)})"
         for name, (lower, upper) in sensor_geometry(value).items():
@@ -139,14 +153,24 @@ def _expression(value: object, variables: dict, path: str, depth: int = 0) -> ty
     return result
 
 
-def evaluate(value, variables: dict, sensors=None, window=None, sensors_at=None):
+def evaluate(value, variables: dict, sensors=None, window=None, sensors_at=None, *, vision=None, on_variable=None):
     if not isinstance(value, dict):
         return value
     if "var" in value:
+        if on_variable is not None:
+            on_variable(value["var"])
         return variables[value["var"]]
     op = value["op"]
     if op == "target_window":
         return window is not None and window(value["state"])
+    if op in ("vision_visible", "vision_result"):
+        if vision is None:
+            raise ValueError("recognition expressions need a runtime")
+        return vision(value)
+
+    def operand(child):
+        return evaluate(child, variables, sensors, window, sensors_at, vision=vision, on_variable=on_variable)
+
     if op in SCREEN_SENSOR_OPS:
         if not sensor_has_dynamic_geometry(value):
             return sensors is not None and sensors(value["block_id"])
@@ -154,20 +178,20 @@ def evaluate(value, variables: dict, sensors=None, window=None, sensors_at=None)
             return False
         bounds = []
         for name, (lower, upper) in sensor_geometry(value).items():
-            number = round(evaluate(value[name], variables, sensors, window, sensors_at))
+            number = round(operand(value[name]))
             if not lower <= number <= upper:
                 return False
             bounds.append(number)
         return sensors_at(value["block_id"], tuple(bounds))
     args = value["args"]
-    left = evaluate(args[0], variables, sensors, window, sensors_at)
+    left = operand(args[0])
     if op == "not":
         return not left
     if op == "and":
-        return left and evaluate(args[1], variables, sensors, window, sensors_at)
+        return left and operand(args[1])
     if op == "or":
-        return left or evaluate(args[1], variables, sensors, window, sensors_at)
-    result = _BINARY[op](left, evaluate(args[1], variables, sensors, window, sensors_at))
+        return left or operand(args[1])
+    result = _BINARY[op](left, operand(args[1]))
     if type(result) is float and not math.isfinite(result):
         raise ValueError("expression result must be finite")
     return result
@@ -202,6 +226,60 @@ def _integer(value: object, lower: int, upper: int, path: str) -> int:
     if type(value) is not int or not lower <= value <= upper:
         raise ValidationError(f"{path}: expected an integer from {lower} to {upper}")
     return value
+
+
+def _vision_spec(node, path):
+    location = f"{path} ({_name(node.get('block_id'), path)})"
+    spec = _object(node.get("spec"), location)
+    detector = spec.get("detector")
+    if detector == "template":
+        _name(spec.get("image"), f"{location}.image")
+        if spec.get("method", "TM_CCOEFF_NORMED") != "TM_CCOEFF_NORMED":
+            raise ValidationError(f"{location}: unsupported template matching method")
+    elif detector != "hsv":
+        raise ValidationError(f"{location}: unsupported detector {detector!r}")
+    if "roi" in spec:
+        roi = _object(spec["roi"], f"{location}.roi")
+        if set(roi) != {"left", "top", "width", "height"}:
+            raise ValidationError(f"{location}.roi: expected source-relative left, top, width and height")
+        for edge in ("left", "top", "width", "height"):
+            _integer(roi.get(edge), 1 if edge in ("width", "height") else 0, 32768, f"{location}.roi.{edge}")
+    for name, lower, upper in (
+        ("max_age_ms", 1, 86_400_000), ("scan_interval_ms", 1, 86_400_000),
+        ("appearance_frames", 1, 1000), ("disappearance_frames", 1, 1000),
+        ("cooldown_ms", 0, 86_400_000), ("min_pixel_count", 1, 32768**2),
+    ):
+        if name in spec:
+            _integer(spec[name], lower, upper, f"{location}.{name}")
+    for name, lower in (("enter_threshold", -1), ("exit_threshold", -1), ("min_fraction", 0)):
+        value = spec.get(name, 0)
+        if type(value) not in (int, float) or not lower <= value <= 1:
+            raise ValidationError(f"{location}.{name}: expected a number from {lower} to 1")
+    enter = spec.get("enter_threshold", 0.90)
+    if spec.get("exit_threshold", min(0.82, enter)) > enter:
+        raise ValidationError(f"{location}: exit threshold must not exceed enter threshold")
+    if type(spec.get("fire_on_initial_present", False)) is not bool:
+        raise ValidationError(f"{location}: fire_on_initial_present must be boolean")
+    if detector == "hsv":
+        for name in ("hsv_lower", "hsv_upper"):
+            values = _array(spec.get(name), f"{location}.{name}")
+            if len(values) != 3:
+                raise ValidationError(f"{location}.{name}: expected three HSV channels")
+            for value, limit in zip(values, (179, 255, 255)):
+                _integer(value, 0, limit, f"{location}.{name}")
+        if any(lo > hi for lo, hi in zip(spec["hsv_lower"][1:], spec["hsv_upper"][1:])):
+            raise ValidationError(f"{location}: HSV saturation and value ranges must be ordered")
+
+
+def vision_nodes(value):
+    if isinstance(value, dict):
+        if value.get("op") in (*VISION_COMMANDS, "vision_visible", "vision_result") or value.get("type") in VISION_EVENTS:
+            yield value
+        for child in value.values():
+            yield from vision_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from vision_nodes(child)
 
 
 def _require_type(expression, variables, expected, path):
@@ -317,7 +395,18 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
                     _integer(coordinate, -32768, 32767, axis_path)
                 else:
                     _require_type(coordinate, variables, int, axis_path)
-        if op == "wait":
+        if op in VISION_COMMANDS:
+            _vision_spec(step, location)
+            _name(step.get("result_var"), location)
+            timeout = step.get("timeout_ms", 1000 if op == "vision_find" else 5000)
+            if timeout is not None or op == "vision_find":
+                _integer(timeout, 1, 86_400_000, f"{location}.timeout_ms")
+            step["timeout_ms"] = timeout
+            if op == "vision_wait" and step.get("condition") not in ("appear", "disappear"):
+                raise ValidationError(f"{location}: invalid vision wait condition")
+            if step.get("on_error", "return_unknown") not in ("return_unknown", "stop_task"):
+                raise ValidationError(f"{location}: invalid recognition error policy")
+        elif op == "wait":
             if "duration" in step:
                 if "duration_ns" in step:
                     raise ValidationError(f"{location}: expected one duration")
@@ -356,6 +445,8 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             if step.get("button") not in ("left", "right", "middle"):
                 raise ValidationError(f"{location}: invalid mouse button")
             _hold_duration(step, variables, location)
+            if type(step.get("revalidate_before_click", True)) is not bool:
+                raise ValidationError(f"{location}: revalidate_before_click must be boolean")
         elif op in ("key_tap", "tap_sequence"):
             step["key"] = _key(step.get("key"), location)
             hold = _hold_duration(step, variables, location)
@@ -425,7 +516,7 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
 
 def validate_program(data: object) -> dict:
     raw = _object(data, "program")
-    version = _integer(raw.get("ir_version"), 1, 2, "ir_version")
+    version = _integer(raw.get("ir_version"), 1, 3, "ir_version")
     project_id = _name(raw.get("project_id"), "project_id")
     initial = _object(raw.get("globals", {}), "globals")
     variables = {
@@ -489,6 +580,10 @@ def validate_program(data: object) -> dict:
             handler["event"] = {"type": event_type, "period_ns": period}
         elif event_type == "custom":
             handler["event"] = {"type": event_type, "name": _event_name(event.get("name"), path)}
+        elif event_type in VISION_EVENTS:
+            event = {**event, "block_id": event.get("block_id", handler.get("block_id", identifier))}
+            _vision_spec(event, path)
+            handler["event"] = event
         else:
             raise ValidationError(f"{path}: unsupported event {event_type!r}")
         handler.setdefault("policy", "ignore_if_running")
@@ -507,6 +602,8 @@ def validate_program(data: object) -> dict:
     }
     if "state_machine" in raw:
         result["state_machine"] = _state_machine(raw["state_machine"], workflows, variables)
+    if version < 3 and (node := next(vision_nodes(result), None)) is not None:
+        raise ValidationError(f"({node.get('block_id')}) recognition requires IR version 3")
     return result
 
 

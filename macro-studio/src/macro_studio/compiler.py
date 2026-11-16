@@ -1,6 +1,7 @@
-from .ir import PARAM_PREFIX, SCREEN_SENSOR_OPS, ValidationError, normalize_hotkey, validate_program
+from .ir import PARAM_PREFIX, SCREEN_SENSOR_OPS, VISION_EVENTS, ValidationError, normalize_hotkey, validate_program
 from .mouse_motion import BUILTIN_PROFILES, DEFAULT_PROFILE
 from .mouse_motion.registry import project_motion_profiles
+from .vision_profiles import resolve_profile
 
 
 def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profiles=None):
@@ -22,7 +23,44 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
         connection = block.get("inputs", {}).get(name, {})
         return connection.get("block") or connection.get("shadow")
 
+    def vision_detector(block):
+        nonlocal version
+        version = 3
+        detector = field(block, "DETECTOR") or "template"
+        image = field(block, "IMAGE") if detector == "template" else None
+        if detector == "template" and (not isinstance(image, str) or image not in project.get("image_assets", {})):
+            fail(block, "프로젝트에 등록된 기준 이미지를 선택하세요.")
+        ref = field(block, "PROFILE") or "inherit"
+        overrides = {}
+        for name in ("enter_threshold", "exit_threshold", "max_age_ms", "min_pixel_count", "min_fraction"):
+            value = field(block, name.upper())
+            if value is not None and value != "":
+                overrides[name] = value
+        if detector == "hsv":
+            for name in ("hsv_lower", "hsv_upper"):
+                value = field(block, name.upper())
+                if value:
+                    try:
+                        overrides[name] = [int(part) for part in value.split(",")]
+                    except (AttributeError, ValueError):
+                        fail(block, "HSV 범위는 쉼표로 구분된 세 정수여야 합니다.")
+        roi = {edge: field(block, "ROI_" + edge.upper()) or 0 for edge in ("left", "top", "width", "height")}
+        if roi["width"] or roi["height"] or roi["left"] or roi["top"]:
+            overrides["roi"] = roi
+        try:
+            spec = resolve_profile(project, ref, image, overrides)
+        except ValueError as error:
+            fail(block, str(error))
+        spec = {**spec, "detector": detector}
+        if image is not None:
+            spec.update(image=image, template_id=image)
+        if field(block, "FIRE_ON_INITIAL_PRESENT") is not None:
+            spec["fire_on_initial_present"] = field(block, "FIRE_ON_INITIAL_PRESENT") in (True, "TRUE")
+        return {"block_id": block["id"], "profile_ref": ref, "spec": spec,
+                **({"template_id": image} if image is not None else {})}
+
     def expression(block, name, fallback):
+        nonlocal version
         value = child(block, name)
         if value is None:
             return fallback
@@ -48,6 +86,12 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
             return {"op": "not", "args": [expression(value, "VALUE", False)]}
         if kind == "target_window":
             return {"op": kind, "state": field(value, "STATE")}
+        if kind == "vision_visible":
+            return {"op": kind, **vision_detector(value)}
+        if kind == "vision_result":
+            version = 3
+            return {"op": kind, "block_id": value["id"], "result_var": field(value, "RESULT"),
+                    "field": field(value, "FIELD")}
         if kind in SCREEN_SENSOR_OPS:
             position = position_value(value) if child(value, "POSITION") else {"x": field(value, "X"), "y": field(value, "Y")}
             sensor = {"op": kind, "block_id": value["id"], **position}
@@ -162,7 +206,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                 case "mouse_move":
                     step.update(position=position_value(block), duration=duration_value(block))
                 case "mouse_move_timed" | "mouse_move_relative_timed":
-                    version = 2
+                    version = max(version, 2)
                     default, snapshots = project_motion_profiles(project)
                     profiles = BUILTIN_PROFILES | (user_profiles or {}) | snapshots
                     ref = field(block, "PROFILE") or "inherit"
@@ -175,6 +219,15 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                         motion={"profile_ref": ref, "profile": profile.to_dict(),
                                 "duration": duration_value(block) if child(block, "DURATION") else None},
                     )
+                case "vision_find" | "vision_wait":
+                    step.update(vision_detector(block), result_var=field(block, "RESULT"))
+                    timeout = field(block, "TIMEOUT_MS")
+                    if kind == "vision_wait" and field(block, "INFINITE") in (True, "TRUE"):
+                        step["timeout_ms"] = None
+                    elif timeout is not None:
+                        step["timeout_ms"] = timeout
+                    if kind == "vision_wait":
+                        step["condition"] = field(block, "CONDITION") or "appear"
                 case "key_tap" | "tap_sequence":
                     step.update(key=keyboard_value(block), **hold_time(block))
                     if kind == "tap_sequence":
@@ -224,6 +277,8 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                     pass
                 case _:
                     fail(block, "실행 블록을 이벤트나 워크플로 안에 연결하세요.")
+            if kind in ("mouse_click", "mouse_click_at") and field(block, "REVALIDATE") is not None:
+                step["revalidate_before_click"] = field(block, "REVALIDATE") in (True, "TRUE")
             result.append(step)
             block = block.get("next", {}).get("block")
         return result
@@ -242,7 +297,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
             returns = field(block, "RETURNS")
             if returns and returns != "void":
                 workflows[name]["return_type"] = returns
-        elif kind in ("ms_start", "ms_hotkey", "ms_interval", "ms_custom"):
+        elif kind in ("ms_start", "ms_hotkey", "ms_interval", "ms_custom", *("ms_" + event for event in VISION_EVENTS)):
             name = "@" + block["id"]
             workflows[name] = {"steps": steps(block.get("next", {}).get("block") or child(block, "BODY"))}
             event = {"type": "project_start"}
@@ -256,6 +311,8 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                 event = {"type": "interval", "period_ns": milliseconds * 1_000_000}
             elif kind == "ms_custom":
                 event = {"type": "custom", "name": field(block, "NAME")}
+            elif kind.removeprefix("ms_") in VISION_EVENTS:
+                event = {"type": kind.removeprefix("ms_"), **vision_detector(block)}
             handler = {"id": block["id"], "block_id": block["id"], "event": event,
                        "workflow_id": name, "policy": field(block, "POLICY") or "ignore_if_running",
                        "priority": field(block, "PRIORITY") if field(block, "PRIORITY") is not None else 0}

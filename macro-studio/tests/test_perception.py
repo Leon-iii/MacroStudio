@@ -252,6 +252,45 @@ def test_worker_reports_capture_loss_and_recovers_with_fresh_frames(tmp_path):
     assert service.latest(spec).error_code == "PERCEPTION_UNAVAILABLE"
 
 
+class _SwitchableCaptureBackend(FakeCaptureBackend):
+    def __init__(self, frames, lost):
+        super().__init__(frames)
+        self.lost = lost
+
+    def read_latest(self):
+        if self.lost.is_set():
+            raise OSError("Test source lost")
+        return super().read_latest()
+
+
+def test_capture_loss_revokes_recent_bboxes_and_recovery_needs_new_observation(tmp_path):
+    spec, _, present = _saved_picture(tmp_path)
+    spec.update(scan_interval_ms=0, max_age_ms=10_000)
+    lost = get_context("spawn").Event()
+    source = partial(_SwitchableCaptureBackend, (present,), lost)
+    with PerceptionService(tmp_path, backend_factory=source) as service:
+        initial_id = service.request(spec)
+        initial = _wait_for(lambda: service.take(initial_id))
+        assert initial.status == "FOUND"
+        assert service.is_current(initial)
+
+        lost.set()
+        failing_id = service.request(dict(spec, enter_threshold=0.95))
+        assert _wait_for(lambda: service.take(failing_id)).error_code == "CAPTURE_FAILED"
+        assert not service.is_current(initial)
+        assert service.latest(spec).status == "UNKNOWN"
+
+        lost.clear()
+
+        def fresh_observation():
+            result = service.latest(spec)
+            return result if result is not None and result.status == "FOUND" else None
+
+        recovered = _wait_for(fresh_observation)
+        assert service.is_current(recovered)
+        assert not service.is_current(initial)
+
+
 class _RepeatedFrameBackend(FakeCaptureBackend):
     cached = None
 
