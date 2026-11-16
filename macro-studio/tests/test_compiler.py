@@ -10,9 +10,14 @@ def project(*blocks):
     return {"project_id": "sample", "workspace": {"blocks": {"blocks": list(blocks)}}}
 
 
-def test_compiles_hat_with_actions_and_reports_detached_blocks():
+@pytest.mark.parametrize("legacy_body", [False, True])
+def test_compiles_hat_with_actions_and_reports_detached_blocks(legacy_body):
     step = {"type": "ms_key_tap", "id": "tap-a", "fields": {"KEY": "A", "MS": 2}}
-    hat = {"type": "ms_start", "id": "startup", "inputs": {"BODY": {"block": step}}}
+    hat = {"type": "ms_start", "id": "startup"}
+    if legacy_body:
+        hat["inputs"] = {"BODY": {"block": step}}
+    else:
+        hat["next"] = {"block": step}
     ir, detached = compile_project(project(hat, {"type": "ms_wait", "id": "loose"}))
     assert detached == ["loose"]
     assert ir["handlers"][0]["event"] == {"type": "project_start"}

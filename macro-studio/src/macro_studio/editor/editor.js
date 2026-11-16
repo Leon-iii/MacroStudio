@@ -19,7 +19,49 @@ const policy = () => dropdown("POLICY", [
 ]);
 const priority = () => number("PRIORITY", 0, -2147483648, 2147483647, 1);
 const valueTypes = [["숫자", "number"], ["불리언", "boolean"], ["문자열", "string"]];
+const argumentTypes = {number: ["숫자", "Number"], boolean: ["불리언", "Boolean"], string: ["문자열", "String"]};
 const workflowList = (name, check) => ({type: "input_statement", name, check});
+const callTypes = new Set(["ms_call", "ms_call_store", "ms_call_if"]);
+const argumentInputName = id => "ARG_" + id;
+
+Blockly.Extensions.registerMutator("studio_call_arguments", {
+  saveExtraState() {
+    return this.argumentParameters ? {parameters: this.argumentParameters} : null;
+  },
+
+  loadExtraState({parameters}) {
+    this.setArgumentParameters(parameters);
+  },
+
+  setArgumentParameters(parameters) {
+    const previous = this.argumentParameters ?? [];
+    const names = new Set(parameters.map(({id}) => argumentInputName(id)));
+    if (this.getInput("ARGS")) this.removeInput("ARGS");
+    if (parameters.length && this.getInput("EMPTY_ARGS")) this.removeInput("EMPTY_ARGS");
+    for (const {id} of previous) {
+      const name = argumentInputName(id);
+      if (!names.has(name)) this.removeInput(name);
+    }
+    for (const {id, name, type} of parameters) {
+      const inputName = argumentInputName(id);
+      const [label, check] = argumentTypes[type];
+      const text = `${name} (${label})`;
+      const socket = this.getInput(inputName) ?? this.appendValueInput(inputName).appendField(text, inputName);
+      this.getField(inputName).setValue(text);
+      socket.setCheck(check);
+    }
+    if (!parameters.length && !this.getInput("EMPTY_ARGS")) {
+      this.appendDummyInput("EMPTY_ARGS").appendField("인자 없음");
+    }
+    let before = this.getInput("THEN") ? "THEN" : null;
+    const order = parameters.length ? parameters.map(({id}) => argumentInputName(id)) : ["EMPTY_ARGS"];
+    for (const name of order.reverse()) {
+      this.moveInputBefore(name, before);
+      before = name;
+    }
+    this.argumentParameters = parameters;
+  },
+});
 const statement = (type, category, message0, args0 = [], extra = {}) => ({
   type: "ms_" + type, colour: palette[category], message0, args0,
   tooltip: message0.replace(/%\d+/g, "").trim(), previousStatement: null, nextStatement: null, ...extra,
@@ -112,26 +154,55 @@ class ImageAssetField extends Blockly.FieldDropdown {
 }
 Blockly.fieldRegistry.register("field_studio_image_asset", ImageAssetField);
 
+const propertyNames = {variable: [], event: []};
+const propertyField = (name, source) => ({type: "field_studio_property", name, source});
+
+class PropertyField extends Blockly.FieldDropdown {
+  static fromJson({source}) {
+    const placeholder = source === "variable" ? "변수 선택" : "이벤트 선택";
+    return new PropertyField(() => [[placeholder, ""], ...propertyNames[source].map(name => [name, name])]);
+  }
+
+  getOptions(useCache) {
+    const options = super.getOptions(useCache);
+    const value = this.getValue();
+    return value && !options.some(([, name]) => name === value)
+      ? [...options, [`${value} (미등록)`, value]] : options;
+  }
+
+  doClassValidation_(value) {
+    return typeof value === "string" ? value : null;
+  }
+
+  refreshOptions() {
+    this.doValueUpdate_(this.getValue());
+    this.forceRerender();
+  }
+}
+Blockly.fieldRegistry.register("field_studio_property", PropertyField);
+
 const batchEdge = {previousStatement: "BatchEdge", nextStatement: "BatchEdge", inputsInline: true};
 const batchOffset = () => number("OFFSET", 0, 0, 5000, 1);
 const batchAction = () => dropdown("ACTION", [["누르기", "down"], ["해제하기", "up"]]);
+const eventHats = new Set(["ms_start", "ms_hotkey", "ms_interval", "ms_custom"]);
 
 Blockly.Extensions.register("studio_duration_default", function () {
   this.setFieldValue("sec", "UNIT");
 });
 
 Blockly.defineBlocksWithJsonArray([
-  hat("start", "event", "%1 %2 우선순위 %3 조건 %4 %5",
-    [label("TITLE", "프로젝트 시작"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
-  hat("hotkey", "event", "%1 %2 %3 우선순위 %4 조건 %5 %6",
-    [label("TITLE", "단축키"), value("KEY", "Key"), policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
-  hat("interval", "event", "%1 %2 %3 우선순위 %4 조건 %5 %6",
+  hat("start", "event", "%1 %2 우선순위 %3 조건 %4",
+    [label("TITLE", "프로젝트 시작"), policy(), priority(), value("GUARD", "Boolean")], {nextStatement: null}),
+  hat("hotkey", "event", "%1 %2 %3 %4 %5 우선순위 %6 조건 %7",
+    [label("TITLE", "단축키"), label("KEY_OPEN", "("), value("KEY", "Key"), label("KEY_CLOSE", ")"),
+     policy(), priority(), value("GUARD", "Boolean")], {nextStatement: null, inputsInline: true}),
+  hat("interval", "event", "%1 %2 %3 우선순위 %4 조건 %5",
     [number("MS", 1000, 1, 86400000, 1), label("TITLE", "ms마다"),
-     policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
-  hat("custom", "event", "%1 %2 %3 %4 우선순위 %5 조건 %6 %7",
-    [label("TITLE", "이벤트"), input("NAME", "준비 완료"), label("TITLE_END", "를 받으면"),
-     policy(), priority(), value("GUARD", "Boolean"), stack("BODY")]),
-  statement("emit_event", "event", "이벤트 %1 발행", [input("NAME", "준비 완료")]),
+     policy(), priority(), value("GUARD", "Boolean")], {nextStatement: null}),
+  hat("custom", "event", "%1 %2 %3 %4 우선순위 %5 조건 %6",
+    [label("TITLE", "이벤트"), propertyField("NAME", "event"), label("TITLE_END", "를 받으면"),
+     policy(), priority(), value("GUARD", "Boolean")], {nextStatement: null}),
+  statement("emit_event", "event", "이벤트 %1 발행", [propertyField("NAME", "event")]),
   expression("key", "%1", [{type: "field_studio_key", name: "VALUE", text: "A"}], "Key", "input"),
   statement("key_tap", "input", "%1 키를 %2 동안 누르기", [value("KEY", "Key"), value("DURATION", "Duration")],
     {inputsInline: true}),
@@ -173,11 +244,11 @@ Blockly.defineBlocksWithJsonArray([
   statement("break", "control", "반복 탈출", [], {nextStatement: undefined}),
   statement("continue", "control", "다음 반복", [], {nextStatement: undefined}),
   statement("end", "control", "이 작업 종료", [], {nextStatement: undefined}),
-  statement("set", "variable", "변수 %1 에 %2 저장", [input("NAME", "enabled"), value("VALUE")]),
+  statement("set", "variable", "변수 %1 에 %2 저장", [propertyField("NAME", "variable"), value("VALUE")]),
   expression("number", "%1", [number("VALUE", 1)], "Number", "arithmetic"),
   expression("boolean", "%1", [dropdown("VALUE", [["참", "TRUE"], ["거짓", "FALSE"]])], "Boolean", "logic"),
   expression("text", "문자열 %1", [input("VALUE", "")], "String", "variable"),
-  expression("variable", "변수 %1", [input("NAME", "enabled")], null, "variable"),
+  expression("variable", "변수 %1", [propertyField("NAME", "variable")], null, "variable"),
   {...expression("binary", "%1 %2 %3", [value("A"),
     dropdown("OP", [...arithmeticOperators, ...comparisonOperators, ...logicalOperators]), value("B")], null),
     inputsInline: true},
@@ -216,13 +287,13 @@ Blockly.defineBlocksWithJsonArray([
   statement("argument", "workflow", "전달할 값 %1", [value("VALUE")],
     {previousStatement: "ArgumentList", nextStatement: "ArgumentList"}),
   statement("call", "workflow", "워크플로 %1 호출", [input("NAME", "작업")],
-    {message1: "인자 %1", args1: [workflowList("ARGS", "ArgumentList")]}),
+    {message1: "인자 %1", args1: [workflowList("ARGS", "ArgumentList")], mutator: "studio_call_arguments"}),
   statement("call_store", "workflow", "워크플로 %1 결과를 변수 %2 에 저장",
-    [input("NAME", "작업"), input("RESULT", "결과")],
-    {message1: "인자 %1", args1: [workflowList("ARGS", "ArgumentList")]}),
+    [input("NAME", "작업"), propertyField("RESULT", "variable")],
+    {message1: "인자 %1", args1: [workflowList("ARGS", "ArgumentList")], mutator: "studio_call_arguments"}),
   statement("call_if", "workflow", "워크플로 %1 결과가 참이면", [input("NAME", "작업")],
     {message1: "인자 %1", args1: [workflowList("ARGS", "ArgumentList")],
-     message2: "실행 %1 그 외 %2", args2: [stack("THEN"), stack("ELSE")]}),
+     message2: "실행 %1 그 외 %2", args2: [stack("THEN"), stack("ELSE")], mutator: "studio_call_arguments"}),
   statement("return", "workflow", "%1 반환", [value("VALUE")], {nextStatement: undefined}),
   hat("state", "state", "상태 %1 시작 상태 %2 진입 워크플로 %3",
     [input("NAME", "대기"), dropdown("INITIAL", [["아니요", "FALSE"], ["예", "TRUE"]]), input("WORKFLOW", "")]),
@@ -242,7 +313,7 @@ const categories = [
   ["산술 연산", "arithmetic", ["number", "arithmetic", "random_float"]],
   ["논리 연산", "logic", ["boolean", "comparison", "logical", "not"]],
   ["화면 센서", "screen", ["pixel_color", "region_image", "region_text", "target_window"]],
-  ["워크플로", "workflow", ["workflow", "param_def", "parameter", "argument", "call", "call_store", "call_if", "return"]],
+  ["워크플로", "workflow", ["workflow", "param_def", "parameter", "call", "call_store", "call_if", "return"]],
   ["상태 머신", "state", ["state", "state_condition", "state_hotkey"]],
 ];
 
@@ -296,7 +367,7 @@ const headerFieldGap = 6;
 const workflowBodyInset = 12;
 const headerFields = {
   ms_start: ["TITLE"],
-  ms_hotkey: ["TITLE"],
+  ms_hotkey: ["TITLE", "KEY_OPEN", "KEY", "KEY_CLOSE"],
   ms_interval: ["MS", "TITLE"],
   ms_custom: ["TITLE", "NAME", "TITLE_END"],
   ms_workflow: ["NAME"],
@@ -318,7 +389,12 @@ function ellipsizeHeader(text) {
 function headerLines(block) {
   const field = name => block.getField(name)?.getText() || "";
   if (headerFields[block.type]) {
-    return block.isCollapsed() ? [headerFields[block.type].map(field).join(" ")] : [];
+    if (!block.isCollapsed()) return [];
+    if (block.type === "ms_hotkey") {
+      const key = keyLabel(block.getInputTargetBlock("KEY")?.getFieldValue("VALUE"));
+      return [key ? `단축키 (${key})` : "단축키"];
+    }
+    return [headerFields[block.type].map(field).join(" ")];
   }
   const condition = block.getInputTargetBlock("GUARD")?.toString(120);
   const guard = condition ? "조건 · " + condition : "조건 없음";
@@ -334,19 +410,6 @@ function headerLines(block) {
 
 function updateBlockHeader(block) {
   if (!block || block.previousConnection || block.outputConnection || !block.getSvgRoot()) return;
-  if (block.type === "ms_hotkey") {
-    const title = block.getField("TITLE");
-    const key = keyLabel(block.getInputTargetBlock("KEY")?.getFieldValue("VALUE"));
-    const text = key ? `단축키 ${key}` : "단축키";
-    if (title.getValue() !== text) {
-      Blockly.Events.disable();
-      try {
-        title.setValue(text);
-      } finally {
-        Blockly.Events.enable();
-      }
-    }
-  }
   const root = block.getSvgRoot();
   const lines = headerLines(block);
   let group = root.querySelector(":scope > .msBlockHeader");
@@ -408,16 +471,20 @@ class StudioZelosRenderInfo extends Blockly.zelos.RenderInfo {
     const names = headerFields[this.block_.type];
     const hat = this.topRow.elements.find(element => Blockly.blockRendering.Types.isHat(element));
     if (!names || !hat || this.block_.isCollapsed()) return;
-    const fields = names.map(name => this.block_.getField(name));
-    this.headerFields = fields.map(field => ({field, size: field.getSize()}));
-    this.headerContentHeight = Math.max(...this.headerFields.map(({size}) => size.height));
-    const contentWidth = this.headerFields.reduce((sum, {size}) => sum + size.width, 0)
-      + headerFieldGap * (fields.length - 1);
+    const keyConnection = this.block_.getInput("KEY")?.connection;
+    const elements = this.inputRows.flatMap(row => row.elements);
+    this.headerElements = names.map(name => {
+      const field = this.block_.getField(name);
+      return elements.find(element => field ? element.field === field : element.connectionModel === keyConnection);
+    });
+    this.headerContentHeight = Math.max(...this.headerElements.map(element => element.height));
+    const contentWidth = this.headerElements.reduce((sum, element) => sum + element.width, 0)
+      + headerFieldGap * (this.headerElements.length - 1);
     this.headerShape = headerShape(contentWidth + 2 * headerPadding, this.headerContentHeight + 2 * headerPadding);
     Object.assign(hat, {width: this.headerShape.width, height: this.headerShape.height,
       ascenderHeight: this.headerShape.height});
     for (const row of this.inputRows) {
-      row.elements = row.elements.filter(element => !fields.includes(element.field));
+      row.elements = row.elements.filter(element => !this.headerElements.includes(element));
     }
   }
 
@@ -443,16 +510,16 @@ class StudioZelosDrawer extends Blockly.zelos.Drawer {
     }
   }
 
-  draw() {
-    super.draw();
-    if (!this.info_.headerFields) return;
+  drawInternals_() {
+    super.drawInternals_();
+    if (!this.info_.headerElements) return;
     let x = headerPadding;
-    for (const {field, size} of this.info_.headerFields) {
-      const y = headerPadding + (this.info_.headerContentHeight - size.height) / 2;
-      const root = field.getSvgRoot();
-      root.setAttribute("transform", `translate(${x},${y})`);
-      if (this.info_.isInsertionMarker) root.setAttribute("display", "none");
-      x += size.width + headerFieldGap;
+    for (const element of this.info_.headerElements) {
+      element.xPos = x;
+      element.centerline = headerPadding + this.info_.headerContentHeight / 2;
+      if (element.field) this.layoutField_(element);
+      else this.drawInlineInput_(element);
+      x += element.width + headerFieldGap;
     }
   }
 }
@@ -548,19 +615,29 @@ workspaceSvg.addEventListener("pointercancel", endRightPan);
 workspaceSvg.addEventListener("lostpointercapture", endRightPan);
 
 const workflowTools = categories.find(([, color]) => color === "workflow")[2];
-let shownWorkflowNames = [];
+let shownWorkflowSignatures = "";
 
-function projectWorkflowNames() {
-  const names = workspace.getTopBlocks(false)
-    .filter(block => block.type === "ms_workflow")
-    .map(block => block.getFieldValue("NAME"))
-    .filter(name => name.trim() && !name.startsWith("@"));
-  return [...new Set(names)].sort((first, second) => first.localeCompare(second, "ko"));
+function workflowSignatures() {
+  const signatures = new Map();
+  for (const block of workspace.getTopBlocks(false)) {
+    if (block.type !== "ms_workflow") continue;
+    const name = block.getFieldValue("NAME");
+    if (!name.trim() || name.startsWith("@") || signatures.has(name)) continue;
+    const parameters = [];
+    for (let param = block.getInputTargetBlock("PARAMS"); param; param = param.getNextBlock()) {
+      parameters.push({id: param.id, name: param.getFieldValue("NAME"), type: param.getFieldValue("TYPE")});
+    }
+    signatures.set(name, parameters);
+  }
+  return [...signatures].sort(([first], [second]) => first.localeCompare(second, "ko"));
 }
 
 workspace.registerToolboxCategoryCallback(workflowCategory, () => {
-  shownWorkflowNames = projectWorkflowNames();
-  const projectBlocks = shownWorkflowNames.map(NAME => ({...toolboxBlock("call"), fields: {NAME}}));
+  const signatures = workflowSignatures();
+  shownWorkflowSignatures = JSON.stringify(signatures);
+  const projectBlocks = signatures.map(([NAME, parameters]) => ({
+    ...toolboxBlock("call"), fields: {NAME}, extraState: {parameters},
+  }));
   return [
     {kind: "label", text: projectBlocks.length ? "프로젝트 워크플로" : "정의한 워크플로 없음"},
     ...projectBlocks,
@@ -569,16 +646,62 @@ workspace.registerToolboxCategoryCallback(workflowCategory, () => {
   ];
 });
 
-function refreshWorkflowCategory() {
+function refreshWorkflowCategory(signatures) {
   const toolbox = workspace.getToolbox();
   if (toolbox.getSelectedItem()?.getId() !== workflowCategory || workspace.isDragging()) return;
-  const names = projectWorkflowNames();
-  if (names.length !== shownWorkflowNames.length || names.some((name, index) => name !== shownWorkflowNames[index])) {
-    toolbox.refreshSelection();
+  if (JSON.stringify(signatures) !== shownWorkflowSignatures) toolbox.refreshSelection();
+}
+
+function syncCallArguments(signatures) {
+  const definitions = new Map(signatures);
+  Blockly.Events.disable();
+  try {
+    for (const block of workspace.getAllBlocks(false)) {
+      if (!callTypes.has(block.type)) continue;
+      const parameters = definitions.get(block.getFieldValue("NAME"));
+      const legacy = block.getInputTargetBlock("ARGS");
+      if (!parameters && (legacy || block.argumentParameters?.length)) continue;
+      const signature = parameters ?? [];
+      if (legacy) {
+        const values = [];
+        for (let arg = legacy; arg; arg = arg.getNextBlock()) {
+          values.push(arg.getInput("VALUE").connection);
+        }
+        if (values.length > signature.length || values.some((connection, index) => {
+          const checks = connection.targetConnection?.getCheck();
+          return checks && !checks.includes(argumentTypes[signature[index].type][1]);
+        })) continue;
+        const saved = values.map(connection => {
+          const target = connection.targetBlock();
+          const shadow = connection.getShadowState();
+          connection.setShadowState(null);
+          if (target && !target.isShadow() && connection.isConnected()) connection.disconnect();
+          return {target: target?.isShadow() ? null : target?.outputConnection, shadow};
+        });
+        legacy.dispose(false);
+        block.setArgumentParameters(signature);
+        saved.forEach(({target, shadow}, index) => {
+          const connection = block.getInput(argumentInputName(signature[index].id)).connection;
+          if (target) connection.connect(target);
+          if (shadow) connection.setShadowState(shadow);
+        });
+      } else if (JSON.stringify(signature) !== JSON.stringify(block.argumentParameters)) {
+        block.setArgumentParameters(signature);
+      }
+    }
+  } finally {
+    Blockly.Events.enable();
   }
 }
 
 function upgradeBlockInputs(block) {
+  if (eventHats.has(block.type) && block.inputs?.BODY) {
+    block.next ??= block.inputs.BODY;
+    delete block.inputs.BODY;
+  }
+  if (["ms_custom", "ms_emit_event"].includes(block.type) && typeof block.fields?.NAME === "string") {
+    block.fields.NAME = block.fields.NAME.trim();
+  }
   const isRegion = block.type === "ms_region_image" || block.type === "ms_region_text";
   if ((hotkeyBlocks.has(block.type) || singleKeyBlocks.has(block.type)) && typeof block.fields?.KEY === "string") {
     block.inputs ??= {};
@@ -631,6 +754,18 @@ new QWebChannel(qt.webChannelTransport, channel => {
   const bridge = channel.objects.bridge;
   pickColour = (initial, done) => bridge.chooseColour(initial, done);
   listenForKey = (mode, done) => bridge.chooseKey(mode, done);
+  bridge.propertyOptionsChanged.connect(data => {
+    Object.assign(propertyNames, JSON.parse(data));
+    for (const editor of [workspace, workspace.getToolbox().getFlyout().getWorkspace()]) {
+      for (const block of editor.getAllBlocks(false)) {
+        for (const input of block.inputList) {
+          for (const field of input.fieldRow) {
+            if (field instanceof PropertyField) field.refreshOptions();
+          }
+        }
+      }
+    }
+  });
   bridge.imageAssetsChanged.connect(data => {
     const options = Object.entries(JSON.parse(data)).map(([id, name]) => [name, id]);
     options.sort(([first], [second]) => first.localeCompare(second, "ko"));
@@ -642,12 +777,19 @@ new QWebChannel(qt.webChannelTransport, channel => {
     }
   });
   let workspacePublishQueued = false;
+  let argumentSyncNeeded = false;
   const headersToRefresh = new Set();
   function scheduleWorkspacePublish() {
     if (workspacePublishQueued) return;
     workspacePublishQueued = true;
     queueMicrotask(() => {
       workspacePublishQueued = false;
+      if (argumentSyncNeeded && !workspace.isDragging()) {
+        argumentSyncNeeded = false;
+        const signatures = workflowSignatures();
+        syncCallArguments(signatures);
+        refreshWorkflowCategory(signatures);
+      }
       for (const block of headersToRefresh) updateBlockHeader(block);
       headersToRefresh.clear();
       bridge.changed(JSON.stringify(Blockly.serialization.workspaces.save(workspace)));
@@ -697,6 +839,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
       const state = JSON.parse(data);
       state.blocks?.blocks?.forEach(upgradeBlockInputs);
       Blockly.serialization.workspaces.load(state, workspace);
+      syncCallArguments(workflowSignatures());
       workspace.getAllBlocks(false).forEach(styleBreakpoint);
       workspace.clearUndo();
       if (workspace.getTopBlocks(false).length) {
@@ -708,7 +851,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
       Blockly.Events.enable();
       viewing = false;
     }
-    refreshWorkflowCategory();
+    refreshWorkflowCategory(workflowSignatures());
   });
   let lastWidth = document.documentElement.clientWidth;
   window.addEventListener("resize", () => {
@@ -726,13 +869,28 @@ new QWebChannel(qt.webChannelTransport, channel => {
     workspace.highlightBlock(id || null);
     if (id && workspace.getBlockById(id)) workspace.centerOnBlock(id);
   });
-  workspace.addChangeListener(event => {
-    if (!viewing && (event.type === Blockly.Events.BLOCK_CREATE || event.type === Blockly.Events.BLOCK_DELETE ||
-        (event.type === Blockly.Events.BLOCK_CHANGE && event.element === "field" && event.name === "NAME") ||
-        (event.type === Blockly.Events.BLOCK_DRAG && !event.isStart))) {
-      refreshWorkflowCategory();
+  bridge.navigateBlock.connect(id => {
+    const block = workspace.getBlockById(id);
+    if (!block) return;
+    const parents = [];
+    for (let parent = block.getSurroundParent(); parent; parent = parent.getSurroundParent()) parents.unshift(parent);
+    for (const parent of parents) {
+      if (parent.isCollapsed()) parent.setCollapsed(false);
     }
+    workspace.highlightBlock(id);
+    workspace.centerOnBlock(id);
+  });
+  workspace.addChangeListener(event => {
+    if (!viewing && event.type === Blockly.Events.BLOCK_DRAG && !event.isStart) scheduleWorkspacePublish();
     if (!viewing && !event.isUiEvent) {
+      const block = workspace.getBlockById(event.blockId);
+      if (event.type === Blockly.Events.BLOCK_CREATE || event.type === Blockly.Events.BLOCK_DELETE ||
+          event.type === Blockly.Events.BLOCK_MOVE ||
+          (event.type === Blockly.Events.BLOCK_CHANGE && event.element === "field" &&
+           ((event.name === "NAME" && (block?.type === "ms_workflow" || callTypes.has(block?.type))) ||
+            (block?.type === "ms_param_def" && (event.name === "NAME" || event.name === "TYPE"))))) {
+        argumentSyncNeeded = true;
+      }
       for (const id of [event.blockId, event.oldParentId, event.newParentId]) {
         if (id) {
           const root = workspace.getBlockById(id)?.getRootBlock();

@@ -32,8 +32,23 @@ def project():
             "workspace": {"blocks": {"blocks": [workflow, start]}}}
 
 
-def test_delayed_return_is_stored_and_drives_direct_branch():
-    code, detached = compile_project(project())
+@pytest.mark.parametrize("direct_inputs", [False, True])
+def test_delayed_return_is_stored_and_drives_direct_branch(direct_inputs):
+    data = project()
+    if direct_inputs:
+        workflow, start = data["workspace"]["blocks"]["blocks"]
+        number = workflow["inputs"]["PARAMS"]["block"]
+        boolean = {"type": "ms_param_def", "id": "b", "fields": {"NAME": "flag", "TYPE": "boolean"}}
+        boolean["next"] = {"block": number}
+        workflow["inputs"]["PARAMS"]["block"] = boolean
+        save = start["inputs"]["BODY"]["block"]
+        for call in (save, save["next"]["block"]):
+            inputs = call["inputs"]
+            # Sockets serialize in any order; the definition determines the call order.
+            inputs["ARG_n"] = inputs.pop("ARGS")["block"]["inputs"]["VALUE"]
+            inputs["ARG_b"] = {"shadow": {"type": "ms_boolean", "fields": {"VALUE": "TRUE"}}}
+        data["workspace"]["blocks"]["blocks"].reverse()
+    code, detached = compile_project(data)
     assert not detached
     clock = VirtualClock()
     backend = FakeInputBackend(clock)

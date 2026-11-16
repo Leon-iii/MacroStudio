@@ -70,6 +70,12 @@ def compile_project(project):
             yield block
             block = block.get("next", {}).get("block")
 
+    top_blocks = workspace.get("blocks", {}).get("blocks", [])
+    workflow_parameters = {
+        field(block, "NAME"): list(chain(child(block, "PARAMS"), "ms_param_def"))
+        for block in top_blocks if block["type"] == "ms_workflow"
+    }
+
     def duration_value(block):
         duration = child(block, "DURATION")
         if not duration or duration["type"] != "ms_duration":
@@ -173,10 +179,18 @@ def compile_project(project):
                     step["op"] = "call"
                     step["workflow_id"] = field(block, "NAME")
                     args = []
-                    for arg in chain(child(block, "ARGS"), "ms_argument"):
-                        if not child(arg, "VALUE"):
-                            fail(arg, "전달할 인자 값을 연결하세요.")
-                        args.append(expression(arg, "VALUE", None))
+                    legacy = child(block, "ARGS")
+                    if legacy:
+                        for arg in chain(legacy, "ms_argument"):
+                            if not child(arg, "VALUE"):
+                                fail(arg, "전달할 인자 값을 연결하세요.")
+                            args.append(expression(arg, "VALUE", None))
+                    else:
+                        for param in workflow_parameters.get(step["workflow_id"], []):
+                            socket = "ARG_" + param["id"]
+                            if not child(block, socket):
+                                fail(block, f"{field(param, 'NAME')} 인자 값을 연결하세요.")
+                            args.append(expression(block, socket, None))
                     if args:
                         step["args"] = args
                     if kind == "call_store":
@@ -197,7 +211,7 @@ def compile_project(project):
         return result
 
     detached = []
-    for block in workspace.get("blocks", {}).get("blocks", []):
+    for block in top_blocks:
         kind = block["type"]
         if kind == "ms_workflow":
             name = field(block, "NAME")
@@ -205,14 +219,14 @@ def compile_project(project):
                 fail(block, "워크플로 이름을 고유하게 지정하세요.")
             workflows[name] = {"steps": steps(child(block, "BODY")), "params": [
                 {"name": field(param, "NAME"), "type": field(param, "TYPE"), "block_id": param["id"]}
-                for param in chain(child(block, "PARAMS"), "ms_param_def")
+                for param in workflow_parameters[name]
             ]}
             returns = field(block, "RETURNS")
             if returns and returns != "void":
                 workflows[name]["return_type"] = returns
         elif kind in ("ms_start", "ms_hotkey", "ms_interval", "ms_custom"):
             name = "@" + block["id"]
-            workflows[name] = {"steps": steps(child(block, "BODY"))}
+            workflows[name] = {"steps": steps(block.get("next", {}).get("block") or child(block, "BODY"))}
             event = {"type": "project_start"}
             if kind == "ms_hotkey":
                 key = keyboard_value(block, hotkey=True)

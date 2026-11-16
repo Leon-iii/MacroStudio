@@ -16,7 +16,8 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngi
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyleOptionComboBox, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .block_help import BlockHelp
@@ -27,6 +28,7 @@ from .ir import normalize_hotkey
 from .key_capture import KeyCaptureDialog
 from .live import ArmStore
 from .output import HidMode, OutputKind
+from .properties_panel import PropertiesPanel, workspace_properties
 from .sensors import sensor_specs
 
 ASSETS = Path(__file__).with_name("editor")
@@ -87,6 +89,12 @@ QScrollArea#inspector QScrollBar::handle:vertical { background: #a8b8cc; border-
 QScrollArea#inspector QScrollBar::add-line:vertical, QScrollArea#inspector QScrollBar::sub-line:vertical { height: 0; }
 QScrollArea#inspector QScrollBar::add-page:vertical, QScrollArea#inspector QScrollBar::sub-page:vertical { background: transparent; }
 QPlainTextEdit { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; padding: 6px; }
+QTabWidget#inspectorTabs::pane { border: 0; border-left: 1px solid #cbd5e1; }
+QTabWidget#inspectorTabs QTabBar::tab { padding: 8px 16px; color: #475b74; }
+QTabWidget#inspectorTabs QTabBar::tab:selected { border-bottom: 2px solid #2455cb; color: #19283b; }
+QListWidget, QTreeWidget { background: #fff; border: 1px solid #c7d2df; border-radius: 5px; }
+QListWidget::item, QTreeWidget::item { padding: 4px 5px; }
+QListWidget::item:selected, QTreeWidget::item:selected { background: #e1e9f5; color: #19283b; }
 QLabel#footer { color: #435670; padding: 6px 15px; border-top: 1px solid #cbd5e1; }
 """
 SHIELD = '<path d="M12 3.2 19 6v5.5c0 4-2.8 7-7 9.3-4.2-2.3-7-5.3-7-9.3V6Z"/>'
@@ -148,6 +156,8 @@ class Bridge(QObject):
     updated = Signal(str)
     helpRequested = Signal(str)
     imageAssetsChanged = Signal(str)
+    propertyOptionsChanged = Signal(str)
+    navigateBlock = Signal(str)
 
     @Slot()
     def ready(self):
@@ -196,18 +206,17 @@ def new_project(example=False):
     blocks = []
     if example:
         blocks = [
-            {"type": "ms_start", "id": "example-start", "x": 72, "y": 70, "inputs": {
-                "BODY": {"block": {"type": "ms_call", "id": "example-start-call", "fields": {"NAME": "A 누르기"}}},
-            }},
-            {"type": "ms_hotkey", "id": "example-hotkey", "x": 72, "y": 318, "fields": {"KEY": "CTRL+F7"}, "inputs": {
-                "BODY": {"block": {"type": "ms_call", "id": "example-key-call", "fields": {"NAME": "A 누르기"}}},
-            }},
+            {"type": "ms_start", "id": "example-start", "x": 72, "y": 70,
+             "next": {"block": {"type": "ms_call", "id": "example-start-call", "fields": {"NAME": "A 누르기"}}}},
+            {"type": "ms_hotkey", "id": "example-hotkey", "x": 72, "y": 318, "fields": {"KEY": "CTRL+F7"},
+             "next": {"block": {"type": "ms_call", "id": "example-key-call", "fields": {"NAME": "A 누르기"}}}},
             {"type": "ms_workflow", "id": "example-workflow", "x": 72, "y": 566, "fields": {"NAME": "A 누르기"}, "inputs": {
                 "BODY": {"block": {"type": "ms_key_tap", "id": "example-tap", "fields": {"KEY": "A", "MS": 50}}},
             }},
         ]
     return {"schema_version": 1, "project_id": uuid4().hex, "name": "예제 프로젝트" if example else "제목 없는 프로젝트",
-            "workspace": {"blocks": {"languageVersion": 0, "blocks": blocks}}, "globals": {}, "image_assets": {}}
+            "workspace": {"blocks": {"languageVersion": 0, "blocks": blocks}}, "globals": {},
+            "events": [], "image_assets": {}}
 
 
 class Studio(QMainWindow):
@@ -238,6 +247,7 @@ class Studio(QMainWindow):
         self.pending_output = b""
         self.last_error_block = ""
         self.editor_ready = False
+        self.property_options = None
         self.hid_ports = {}
         self.hid_devices = {}
         self.checked_port = None
@@ -249,6 +259,7 @@ class Studio(QMainWindow):
         self.hid_timer.timeout.connect(self.load_hid_ports)
         self.hid_probe_result.connect(self.finish_hid_probe)
         self.build()
+        self.update_properties(publish=True)
         self.refresh()
 
     def build(self):
@@ -302,7 +313,6 @@ class Studio(QMainWindow):
         body.addWidget(self.build_canvas(), 1)
 
         inspector_scroll = QScrollArea(objectName="inspector")
-        inspector_scroll.setFixedWidth(276)
         inspector_scroll.setWidgetResizable(True)
         inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inspector = QWidget()
@@ -359,10 +369,6 @@ class Studio(QMainWindow):
         self.output.currentIndexChanged.connect(self.output_changed)
         self.hid_port.currentIndexChanged.connect(self.hid_selection_changed)
         self.hid_mode.currentIndexChanged.connect(self.hid_mode_changed)
-        self.globals = QLineEdit("{}")
-        self.globals.setToolTip('전역 변수 초기값 JSON. 예: {"enabled": true}')
-        self.globals.textEdited.connect(self.modified)
-        form.addRow("전역 변수", self.globals)
         side.addLayout(form)
         debug_row = QHBoxLayout()
         self.debug_button = self.button("디버그 시작", lambda: self.start(debug=True))
@@ -391,7 +397,17 @@ class Studio(QMainWindow):
         self.jump.setEnabled(False)
         side.addWidget(self.jump)
         inspector_scroll.setWidget(inspector)
-        body.addWidget(inspector_scroll)
+        self.properties = PropertiesPanel()
+        self.properties.addVariable.connect(self.set_variable)
+        self.properties.removeVariable.connect(self.remove_variable)
+        self.properties.addEvent.connect(self.add_event)
+        self.properties.removeEvent.connect(self.remove_event)
+        self.properties.focusBlock.connect(self.bridge.navigateBlock.emit)
+        tabs = QTabWidget(objectName="inspectorTabs")
+        tabs.setFixedWidth(286)
+        tabs.addTab(inspector_scroll, "실행")
+        tabs.addTab(self.properties, "속성")
+        body.addWidget(tabs)
         layout.addLayout(body, 1)
         self.footer = QLabel(objectName="footer")
         layout.addWidget(self.footer)
@@ -448,7 +464,7 @@ class Studio(QMainWindow):
             self.log("블록 편집기를 불러오지 못했습니다.")
 
     def load_workspace(self):
-        self.globals.setText(json.dumps(self.project.get("globals", {}), ensure_ascii=False))
+        self.update_properties(publish=True)
         self.publish_image_assets()
         self.bridge.loadWorkspace.emit(json.dumps(self.project["workspace"], ensure_ascii=False))
         self.refresh()
@@ -473,6 +489,46 @@ class Studio(QMainWindow):
 
     def workspace_changed(self, value):
         self.project["workspace"] = json.loads(value)
+        self.update_properties()
+        self.modified()
+
+    def update_properties(self, *, publish=False):
+        self.variable_uses, self.event_uses, workflows = workspace_properties(self.project["workspace"])
+        variables = self.project.setdefault("globals", {})
+        events = sorted(set(self.project.get("events", [])) | self.event_uses)
+        self.project["events"] = events
+        if variables != self.properties.initial_values or tuple(events) != self.properties.event_names or publish:
+            self.properties.set_options(variables, events)
+        self.properties.set_workflows(workflows)
+        options = {"variable": sorted(variables), "event": events}
+        if publish or self.property_options != options:
+            self.property_options = options
+            self.bridge.propertyOptionsChanged.emit(json.dumps(options, ensure_ascii=False))
+
+    def set_variable(self, name, value):
+        self.project["globals"][name] = value
+        self.update_properties(publish=True)
+        self.modified()
+
+    def remove_variable(self, name):
+        if name in self.variable_uses:
+            QMessageBox.information(self, "변수 삭제", "이 변수를 사용하는 블록에서 먼저 선택을 바꾸세요.")
+            return
+        del self.project["globals"][name]
+        self.update_properties()
+        self.modified()
+
+    def add_event(self, name):
+        self.project["events"].append(name)
+        self.update_properties()
+        self.modified()
+
+    def remove_event(self, name):
+        if name in self.event_uses:
+            QMessageBox.information(self, "이벤트 삭제", "이 이벤트를 사용하는 블록에서 먼저 선택을 바꾸세요.")
+            return
+        self.project["events"].remove(name)
+        self.update_properties()
         self.modified()
 
     def modified(self):
@@ -723,6 +779,10 @@ class Studio(QMainWindow):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
             validate_assets(project.get("image_assets", {}))
             project_output(project)
+            if (not isinstance(project.get("globals", {}), dict)
+                    or not isinstance(project.get("events", []), list)
+                    or not all(isinstance(name, str) and name.strip() for name in project.get("events", []))):
+                raise ValueError("변수 또는 이벤트 목록의 형식이 잘못되었습니다.")
             self.project, self.path, self.dirty = project, Path(path), False
             self.restore_output_profile()
             self.load_workspace()
@@ -744,8 +804,7 @@ class Studio(QMainWindow):
     def write(self, path, copy=False):
         from PySide6.QtCore import QSaveFile
         try:
-            values = self.global_values()
-            project = dict(self.project, globals=values, name=path.stem)
+            project = dict(self.project, name=path.stem)
             if copy:
                 project["project_id"] = uuid4().hex
             output = QSaveFile(str(path))
@@ -761,12 +820,6 @@ class Studio(QMainWindow):
         self.refresh()
         return True
 
-    def global_values(self):
-        values = json.loads(self.globals.text())
-        if not isinstance(values, dict):
-            raise ValueError("전역 변수는 JSON 객체로 입력하세요.")
-        return values
-
     def jump_to_error(self):
         self.bridge.focusBlock.emit(self.last_error_block)
 
@@ -781,7 +834,7 @@ class Studio(QMainWindow):
         self.jump.setEnabled(False)
         self.jump_to_error()
         try:
-            program, detached = compile_project(dict(self.project, globals=self.global_values()))
+            program, detached = compile_project(self.project)
             sensor_specs(program)
         except (ValueError, KeyError, TypeError, RecursionError) as error:
             match = re.search(r"\(([^()]*)\)", str(error))
