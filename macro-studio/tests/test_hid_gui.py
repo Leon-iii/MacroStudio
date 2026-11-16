@@ -90,11 +90,22 @@ def test_editor_checks_hid_and_runner_receives_port_only_for_armed_hid(monkeypat
         studio.toggle_arm()
         assert studio.armed()
         studio.start()
-        armed_payload = sent[-1]
-        armed = json.loads(armed_payload)
+        onboard_payload = sent[-1]
+        armed = json.loads(onboard_payload)
         assert armed["target"] == 42 and armed["hid_port"] == "COM9" and armed["hid_onboard"] is True
         assert not studio.output.isEnabled() and not studio.hid_port.isEnabled()
         finish()
+
+        studio.hid_mode.setCurrentIndex(studio.hid_mode.findData(HidMode.ADAPTIVE))
+        assert studio.project["output_profile"]["hid_mode"] == "adaptive"
+        studio.start()
+        adaptive_payload = sent[-1]
+        adaptive = json.loads(adaptive_payload)
+        assert adaptive["hid_mode"] == "adaptive" and "hid_onboard" not in adaptive
+        finish()
+        studio.hid_mode.setCurrentIndex(studio.hid_mode.findData(HidMode.STREAMING))
+        assert "hid_mode" not in studio.project["output_profile"]
+        armed_payload = adaptive_payload
 
         ports.pop()
         studio.load_hid_ports()
@@ -112,13 +123,13 @@ def test_editor_checks_hid_and_runner_receives_port_only_for_armed_hid(monkeypat
         monkeypatch.setattr(editor_runner, "FileIO", lambda *args, **kwargs: BytesIO(armed_payload))
         monkeypatch.setattr(win32, "WindowsDesktop", object)
 
-        def record(_program, _desktop, target, _duration, *, hid_port, hid_onboard, **_callbacks):
-            calls.append((target, hid_port, hid_onboard))
+        def record(_program, _desktop, target, _duration, *, hid_port, hid_onboard, hid_mode, **_callbacks):
+            calls.append((target, hid_port, hid_onboard, hid_mode))
             return {"errors": []}
 
         monkeypatch.setattr(editor_runner, "run_live", record)
         editor_runner.main()
-        assert calls == [(42, "COM9", True)]
+        assert calls == [(42, "COM9", False, "adaptive")]
     finally:
         studio.heartbeat.stop()
         studio.hid_timer.stop()
@@ -159,17 +170,21 @@ def test_project_restores_leonardo_by_usb_identity_after_com_number_changes(monk
     monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", lambda *args: (selected_file[0], ""))
     try:
         studio.output.setCurrentIndex(studio.output.findData(OutputKind.EXTERNAL_HID))
+        studio.hid_mode.setCurrentIndex(studio.hid_mode.findData(HidMode.ADAPTIVE))
         studio.hid_port.setCurrentIndex(studio.hid_port.findData("COM5"))
         wait_for_probe()
         assert studio.dirty and studio.write(path)
         saved = json.loads(path.read_text(encoding="utf-8"))
-        assert saved["output_profile"] == {"output_kind": "external_hid", "device_selector": leonardo}
+        assert saved["output_profile"] == {
+            "output_kind": "external_hid", "hid_mode": "adaptive", "device_selector": leonardo,
+        }
 
         studio.create()
         assert studio.output.currentData() == OutputKind.FAKE
         ports[:] = [dict(leonardo, port="COM5", serial_number="OTHER-LEONARDO")]
         studio.open()
         assert studio.output.currentData() == OutputKind.EXTERNAL_HID
+        assert studio.hid_mode.currentData() == HidMode.ADAPTIVE
         assert studio.hid_port.currentData() is None and studio.checked_port is None
         assert studio.hid_status.text() == "저장된 HID 장치를 찾을 수 없습니다."
         assert probed == ["COM5"]

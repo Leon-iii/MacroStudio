@@ -359,6 +359,7 @@ class Studio(QMainWindow):
         self.hid_mode = FlatComboBox(objectName="hidMode")
         self.hid_mode.setAccessibleName("HID 실행 방식")
         self.hid_mode.addItem("Streaming", HidMode.STREAMING)
+        self.hid_mode.addItem("Adaptive", HidMode.ADAPTIVE)
         self.hid_mode.addItem("Onboard", HidMode.ONBOARD)
         form.addRow("HID 실행", self.hid_mode)
         self.hid_status = QLabel(objectName="hidStatus", wordWrap=True)
@@ -614,8 +615,9 @@ class Studio(QMainWindow):
 
     def hid_mode_changed(self):
         profile = self.project.setdefault("output_profile", {"output_kind": self.output.currentData()})
-        if self.hid_mode.currentData() == HidMode.ONBOARD:
-            profile["hid_mode"] = HidMode.ONBOARD
+        mode = self.hid_mode.currentData()
+        if mode in (HidMode.ADAPTIVE, HidMode.ONBOARD):
+            profile["hid_mode"] = HidMode(mode).value
         else:
             profile.pop("hid_mode", None)
         self.modified()
@@ -727,7 +729,9 @@ class Studio(QMainWindow):
                 self.log(f"{port} · {detail}")
             else:
                 self.checked_port = port
-                self.hid_mode.model().item(1).setEnabled(device.get("max_onboard_jobs", 0) > 0)
+                self.hid_mode.model().item(self.hid_mode.findData(HidMode.ONBOARD)).setEnabled(
+                    device.get("max_onboard_jobs", 0) > 0
+                )
                 self.hid_mode.setEnabled(True)
                 self.set_hid_status(f"{port} 연결 확인", "ready",
                                     f"{device['board']} · 펌웨어 {device['firmware']} · HID {device['protocol']}")
@@ -903,6 +907,8 @@ class Studio(QMainWindow):
             config["hid_port"] = hid_port
             if self.hid_mode.currentData() == HidMode.ONBOARD:
                 config["hid_onboard"] = True
+            elif self.hid_mode.currentData() == HidMode.ADAPTIVE:
+                config["hid_mode"] = HidMode.ADAPTIVE.value
         data = json.dumps(config).encode("ascii")
         if len(data) >= 4 * 1024 * 1024 - 1:
             self.clear_runner_assets()

@@ -83,6 +83,9 @@ class Runtime:
         self.onboard_taps = None
         self.onboard_done: Callable[[int], None] | None = None
         self.batch_done: Callable[[int], None] | None = None
+        self.adaptive_device_steps: frozenset[int] | None = None
+        self.on_adaptive_route: Callable[[dict, bool], None] | None = None
+        self._adaptive_routes: dict[int, bool] = {}
         self._onboard_owner: Task | None = None
         self._batch_active = False
         self._batch_held: set[str] = set()
@@ -105,6 +108,7 @@ class Runtime:
 
         self.globals = dict(self.program["globals"])
         self.errors.clear()
+        self._adaptive_routes.clear()
         self.missed_ticks = 0
         self._input_failed = False
         self.termination = "completed"
@@ -482,7 +486,7 @@ class Runtime:
                 case "tap_sequence":
                     yield from self._tap_sequence(task, step, scope)
                 case "timed_batch":
-                    yield from self._timed_batch(task, step["events"])
+                    yield from self._timed_batch(task, step)
 
     def _wait_for_modifiers(self) -> Iterator[int]:
         if self.modifiers_pressed is None:
@@ -589,6 +593,18 @@ class Runtime:
 
         return Frame(step["steps"], iterations, loop_block_id=step.get("block_id"), is_loop=True)
 
+    def _use_onboard(self, step: dict) -> bool:
+        if self.adaptive_device_steps is None:
+            return self.onboard_taps is not None
+        identifier = id(step)
+        device = (identifier in self.adaptive_device_steps and len(self._active) == 1
+                  and self._onboard_owner is None and self._pointer_owner is None and not self._owners)
+        if self._adaptive_routes.get(identifier) is not device:
+            self._adaptive_routes[identifier] = device
+            if self.on_adaptive_route is not None:
+                self.on_adaptive_route(step, device)
+        return device
+
     def _tap_sequence(self, task: Task, step: dict, scope: dict) -> Iterator[int]:
         frequency = self._sequence_integer(step, scope, "frequency_hz", 200)
         count = self._sequence_integer(step, scope, "count", MAX_REPEAT_COUNT)
@@ -596,7 +612,7 @@ class Runtime:
         if hold_ns * frequency >= SECOND_NS:
             raise TaskFault("tap_sequence_duration", "hold must be shorter than the period")
         yield from self._wait_for_modifiers()
-        if self.onboard_taps is not None:
+        if self._use_onboard(step):
             yield from self._onboard_train(task, step["key"], frequency, hold_ns, count)
             return
         origin = self.clock.now_ns
@@ -629,7 +645,10 @@ class Runtime:
             self.before_press(key)
         self._onboard_owner = task
         try:
-            self.onboard_taps.start_tap_train(key, period_us, hold_us, count)
+            self.onboard_taps.prepare_tap_train(key, period_us, hold_us, count)
+            if self.before_press is not None:
+                self.before_press(key)
+            self.onboard_taps.start_tap_train()
             yield from self._await_job(count, period_us * count, self.onboard_done)
         except (OSError, RuntimeError) as error:
             raise InputFault(str(error)) from error
@@ -649,12 +668,14 @@ class Runtime:
             yield min(deadline, self.clock.now_ns + 8_000_000)
         raise InputFault("onboard job completion timed out")
 
-    def _timed_batch(self, task: Task, events: list[dict]) -> Iterator[int]:
+    def _timed_batch(self, task: Task, step: dict) -> Iterator[int]:
         if self._onboard_owner is not None or self._pointer_owner is not None or self._owners:
             raise TaskFault("input_conflict", "another task owns an input needed by the timed batch")
+        events = step["events"]
+        device = self._use_onboard(step)
         self._onboard_owner = task
         self._batch_active = True
-        if self.onboard_taps is not None:
+        if device:
             try:
                 self.onboard_taps.queue_batch(events)
                 if self.before_press is not None:
@@ -673,11 +694,16 @@ class Runtime:
                 yield deadline
             if edge["action"] == "mouse_move":
                 x, y = self._pointer_position()
-                self._send((x + edge["dx"], y + edge["dy"]), "mouse_move", deadline, self.backend.send_mouse_move)
+                position = (x + edge["dx"], y + edge["dy"])
+                if self.before_move is not None:
+                    self.before_move(position)
+                self._send(position, "mouse_move", deadline, self.backend.send_mouse_move)
                 continue
             key = edge["key"] if "key" in edge else "mouse:" + edge["button"]
             down = edge["action"].endswith("_down")
             if down:
+                if self.before_press is not None:
+                    self.before_press(key)
                 self._batch_held.add(key)
             self._batch_edge(key, down, deadline)
             if not down:

@@ -218,7 +218,8 @@ def main():
             result = run_live(program, WindowsDesktop(), config["target"], duration,
                               status=lambda message: emit("log", message=message),
                               control=command, on_state=state, on_runtime=attach,
-                              hid_port=config.get("hid_port"), hid_onboard=config.get("hid_onboard") is True)
+                              hid_port=config.get("hid_port"), hid_onboard=config.get("hid_onboard") is True,
+                              hid_mode=config.get("hid_mode"))
             errors = result["errors"]
         else:
             debugging = config.get("debug") is True

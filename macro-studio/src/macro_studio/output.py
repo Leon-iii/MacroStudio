@@ -13,6 +13,7 @@ class OutputKind(str, Enum):
 
 class HidMode(str, Enum):
     STREAMING = "streaming"
+    ADAPTIVE = "adaptive"
     ONBOARD = "onboard"
 
 
@@ -107,7 +108,7 @@ class OutputRouter:
             if kind is OutputKind.EXTERNAL_HID:
                 if mode is None:
                     raise ValueError("external_hid output requires a HID mode")
-                if mode not in (HidMode.STREAMING, HidMode.ONBOARD):
+                if mode not in (HidMode.STREAMING, HidMode.ADAPTIVE, HidMode.ONBOARD):
                     raise ValueError(f"unsupported HID mode: {mode}")
             elif mode is not None:
                 raise ValueError("HID mode requires external_hid output")

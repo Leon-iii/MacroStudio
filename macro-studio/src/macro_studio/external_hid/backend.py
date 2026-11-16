@@ -112,7 +112,7 @@ class HidBackend:
         if errors:
             raise OSError("Windows HID cleanup failed: " + ", ".join(errors))
 
-    def start_tap_train(self, key: str, period_us: int, hold_us: int, count: int) -> None:
+    def prepare_tap_train(self, key: str, period_us: int, hold_us: int, count: int) -> None:
         usage = key_usage(key)
         if usage >= 0xE0:
             raise TransportError("onboard tap train requires a non-modifier key")
@@ -120,7 +120,11 @@ class HidBackend:
         self.link.exchange(Opcode.PREPARE_JOB, pack("<HHHIII", self._job_id, 7, usage,
                                                    period_us, hold_us, count))
         self._job_key = key
-        self._held_keys.add(key)
+
+    def start_tap_train(self) -> None:
+        if self._job_key is None:
+            raise TransportError("tap train was not prepared")
+        self._held_keys.add(self._job_key)
         self.link.exchange(Opcode.START_JOB, pack("<H", self._job_id))
 
     def queue_batch(self, edges: list[dict]) -> None:

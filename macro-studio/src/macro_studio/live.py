@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter_ns, sleep
 
+from .adaptive import device_steps
 from .external_hid.backend import HidBackend, key_usage
 from .external_hid.serial_link import open_port
 from .ir import DEFAULT_STOP_HOTKEY
@@ -83,13 +84,18 @@ def _keys(steps):
 def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
              stop_hotkey: str = DEFAULT_STOP_HOTKEY, metrics: bool = False,
              status=print, clock=None, control=None, on_state=None, on_runtime=None,
-             hid_port: str | None = None, hid_onboard: bool = False) -> dict:
+             hid_port: str | None = None, hid_onboard: bool = False,
+             hid_mode: HidMode | str | None = None) -> dict:
     clock = DeadlineClock() if clock is None else clock
     routes = {OutputKind.SENDINPUT: OutputRoute(DESKTOP_CAPABILITIES, lambda: desktop)}
     profile = SENDINPUT_PROFILE
     hid = None
-    if hid_onboard and not hid_port:
-        raise ValueError("onboard mode requires a selected HID port")
+    if (hid_onboard or hid_mode is not None) and not hid_port:
+        raise ValueError("HID mode requires a selected HID port")
+    if hid_onboard and hid_mode not in (None, HidMode.ONBOARD):
+        raise ValueError("conflicting HID modes")
+    mode = HidMode(hid_mode) if hid_mode is not None else (
+        HidMode.ONBOARD if hid_onboard else HidMode.STREAMING)
     target = desktop.target(hwnd)
     if stop_hotkey in (RESUME_HOTKEY, PAUSE_HOTKEY):
         raise ValueError("emergency stop conflicts with a session control hotkey")
@@ -151,11 +157,12 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             link = outputs.enter_context(open_port(hid_port, timeout_ms=75))
             hid = HidBackend(link, desktop, clock, link.inspect())
             cleanup.callback(hid.release_stuck_inputs)
-            profile = OutputProfile("external_hid", OutputKind.EXTERNAL_HID,
-                                    HidMode.ONBOARD if hid_onboard else HidMode.STREAMING)
+            profile = OutputProfile("external_hid", OutputKind.EXTERNAL_HID, mode)
             routes[OutputKind.EXTERNAL_HID] = OutputRoute(
-                replace(hid.capabilities, timed_batch=hid_onboard and hid.capabilities.timed_batch), lambda: hid)
+                replace(hid.capabilities, timed_batch=mode is HidMode.ADAPTIVE or (
+                    mode is HidMode.ONBOARD and hid.capabilities.timed_batch)), lambda: hid)
         session = OutputRouter(routes).bind(program, RunConfig(profile, dry_run=False, armed=True))
+        adaptive_steps = device_steps(live_program, hid.capabilities) if mode is HidMode.ADAPTIVE else None
         if hid is not None:
             if (control and control() == "stop") or 1 in desktop.poll_hotkeys():
                 return {"termination": "stopped", "events": [], "errors": [], "missed_ticks": 0,
@@ -173,8 +180,8 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
             signals = desktop.poll_hotkeys()
             if request == "stop" or 1 in signals or not desktop.alive(target):
                 return "stop", []
-            modifiers_during_job = hid_onboard and hid.job_active and desktop.modifiers_pressed()
-            pointer_outside = hid_onboard and hid.batch_uses_pointer and not desktop.cursor_over(target)
+            modifiers_during_job = hid is not None and hid.job_active and desktop.modifiers_pressed()
+            pointer_outside = hid is not None and hid.batch_uses_pointer and not desktop.cursor_over(target)
             if not paused and (request == "pause" or 3 in signals or pause_pending or not desktop.focused(target)
                                or modifiers_during_job or pointer_outside):
                 pause_pending = False
@@ -230,10 +237,19 @@ def run_live(program: dict, desktop, hwnd: int, duration_ns: int, *,
         runtime.before_move = before_move
         if hid is not None and hid.capabilities.mouse_relative:
             runtime.send_pointer_delta = hid.send_delta
-        if hid_onboard:
+        if mode in (HidMode.ONBOARD, HidMode.ADAPTIVE):
             runtime.onboard_taps = hid
             runtime.onboard_done = lambda count: status(f"Onboard TAP_TRAIN completed: {count} taps")
             runtime.batch_done = lambda count: status(f"Timed Batch completed: {count} events")
+        if adaptive_steps is not None:
+            runtime.adaptive_device_steps = adaptive_steps
+
+            def report_route(step, device):
+                destination = "Leonardo" if device else "PC"
+                source = step.get("block_id") or step["op"]
+                status(f"Adaptive · {destination} · {source}")
+
+            runtime.on_adaptive_route = report_route
         runtime.read_window = lambda state: desktop.window_state(target, state)
         if metrics:
             def record(scheduled_ns, actual_ns, action, inserted):

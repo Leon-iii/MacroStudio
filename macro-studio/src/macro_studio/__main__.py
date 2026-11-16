@@ -60,7 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     live = commands.add_parser("start")
     live.add_argument("path", type=Path)
     live.add_argument("--hid-port", help="use External HID on the selected COM port")
-    live.add_argument("--hid-onboard", action="store_true", help="run repeated key taps on the HID device")
+    hid_mode = live.add_mutually_exclusive_group()
+    hid_mode.add_argument("--hid-onboard", action="store_true", help="run repeated key taps on the HID device")
+    hid_mode.add_argument("--hid-adaptive", action="store_true", help="automatically route eligible work to the HID device")
     bench = commands.add_parser("benchmark")
     bench.add_argument("--frequency", type=int, choices=(100, 200), required=True)
     bench.add_argument("--count", type=int, default=100)
@@ -145,6 +147,7 @@ def _windows_command(args) -> int:
         status=lambda message: print(message, file=sys.stderr),
         hid_port=getattr(args, "hid_port", None),
         hid_onboard=getattr(args, "hid_onboard", False),
+        hid_mode="adaptive" if getattr(args, "hid_adaptive", False) else None,
     )
     if args.command == "benchmark":
         report = summarize(args.frequency, result.pop("events"), result["missed_ticks"],

@@ -24,6 +24,7 @@ def _unexpected_backend():
 
 HID_PROFILE = OutputProfile("test-hid", OutputKind.EXTERNAL_HID, HidMode.STREAMING)
 ONBOARD_PROFILE = OutputProfile("test-onboard", OutputKind.EXTERNAL_HID, HidMode.ONBOARD)
+ADAPTIVE_PROFILE = OutputProfile("test-adaptive", OutputKind.EXTERNAL_HID, HidMode.ADAPTIVE)
 
 
 @pytest.mark.parametrize("profile", [SENDINPUT_PROFILE, HID_PROFILE, ONBOARD_PROFILE])
@@ -76,6 +77,19 @@ def test_unavailable_hid_does_not_fall_back():
     router = OutputRouter({OutputKind.FAKE: forbidden, OutputKind.SENDINPUT: forbidden})
     with pytest.raises(ValueError, match="unavailable.*external_hid"):
         router.bind(make_program(100, 1, "A"), RunConfig(HID_PROFILE, dry_run=False, armed=True))
+
+
+def test_adaptive_hid_requires_arm_but_not_onboard_capability():
+    backend = FakeInputBackend(VirtualClock())
+    router = OutputRouter({
+        OutputKind.EXTERNAL_HID: OutputRoute(BackendCapabilities(keyboard=True), lambda: backend),
+    })
+    program = make_program(100, 1, "A")
+    with pytest.raises(ValueError, match="ARM"):
+        router.bind(program, RunConfig(ADAPTIVE_PROFILE, dry_run=False))
+
+    session = router.bind(program, RunConfig(ADAPTIVE_PROFILE, dry_run=False, armed=True))
+    assert session.backend is backend
 
 
 @pytest.mark.parametrize("profile", [
