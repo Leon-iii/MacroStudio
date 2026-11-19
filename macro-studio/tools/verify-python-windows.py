@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from macro_studio.gui import Studio, new_project
+from macro_studio import gui
 from macro_studio.live import ArmStore
 from macro_studio.output import OutputKind
 from macro_studio.win32 import WindowsDesktop
@@ -53,8 +54,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--hid-port")
+    parser.add_argument("--runner-executable", type=Path)
     parser.add_argument("--confirm-real-input", action="store_true", required=True)
     args = parser.parse_args()
+    if args.runner_executable:
+        executable = args.runner_executable.resolve(strict=True)
+
+        class PackagedRunnerProcess(gui.QProcess):
+            def start(self, program, arguments):
+                super().start(str(executable), ["--editor-runner"])
+
+        gui.QProcess = PackagedRunnerProcess
     args.report.parent.mkdir(parents=True, exist_ok=True)
     app = QApplication([])
     desktop = WindowsDesktop()
@@ -78,7 +88,8 @@ def main():
     studio.targets.setCurrentIndex(studio.targets.findData(target_hwnd))
     studio.load_workspace()
     assert studio.write(studio.path)
-    report = {"cases": [], "hid_port": args.hid_port}
+    report = {"cases": [], "hid_port": args.hid_port,
+              "runner": "packaged" if args.runner_executable else "source"}
 
     def wait(check, description, timeout=10):
         deadline = monotonic() + timeout

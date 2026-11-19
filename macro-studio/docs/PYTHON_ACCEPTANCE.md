@@ -30,7 +30,9 @@ Windows 11 x64에서 전용 `Macro Studio Python Acceptance Target` 창을 생�
 | 대상 창으로 포커스 복귀 | 자동 재개 없음 | 자동 재개 없음 |
 | 긴급 정지 CTRL+ALT+SHIFT+F11 | 두 입력 해제·Runner 종료 | 두 입력 해제·Runner 종료 |
 
-실제 화면에서 전용 창의 텍스트 패치를 캡처해 `vision.find → mouse.move_to → mouse.click`을 실행했다. 드라이런에서는 실제 입력과 포인터 이동이 없었고, SendInput에서는 지정한 테스트 창이 클릭을 받았다. 두 경로 모두 정상 종료했으며 눌린 입력이 남지 않았다. 혼합 DPI 캡처는 물리 좌표와 선택 모니터의 원점을 사용했다.
+실제 화면에서 전용 창의 텍스트 패치를 캡처해 `vision.find → mouse.move_to → mouse.click`을 실행했다. 드라이런에서는 실제 입력과 포인터 이동이 없었고, SendInput에서는 지정한 테스트 창이 클릭을 받았다. 두 경로 모두 정상 종료했으며 눌린 입력이 남지 않았다. 캡처는 물리 좌표와 대상 창이 포함된 모니터의 원점을 사용했다.
+
+최종 환경 조회에서 두 모니터는 각각 1920×1080, 96 DPI(100%)였다. 좌표 변환 회귀는 125% 가상화 API 더블로 별도 검사했다. 이번 실기기 결과를 혼합 DPI 검증으로 해석하지 않는다. 초기 테스트 도구의 캡처 화면 선택과 좌표 산정도 대상 창이 포함된 물리 화면을 사용하도록 수정했다.
 
 PY-M01~M05의 탭 전환·오류 표시·작성 자료·출력 선택은 PY-4/PY-5의 실제 Qt WebEngine 화면과 GUI 회귀에서 확인했다. PY-M06~M07은 위 실기기 검사로 확인했다. 최소 960×640 화면도 확인했다.
 
@@ -53,8 +55,12 @@ Windows 11, Python 3.13.1, 논리 CPU 12개에서 각 규모를 한 번 준비�
 
 원시 기록은 [Windows 실기기 결과](acceptance/python-windows-2026-11-19.json)와 [컴파일 측정](acceptance/python-compile-2026-11-19.json)에 보관한다.
 
+배포용 `MacroStudio.exe --editor-runner`에서도 동일한 실기기 검사 10개가 통과했다. 소스 편집기가 테스트 창과 프로토콜을 제어하고, 실제 입력·인식 Worker·Runtime은 배포용 Runner에서 처리했다. [배포 Runner 결과](acceptance/python-windows-package-2026-11-19.json)에 기록했다. 재실행 시 위 명령에 `--runner-executable dist/MacroStudio/MacroStudio.exe`를 추가한다.
+
 ## 배포 검사와 한계
 
 Windows x64 onedir 배포본에는 Python Runtime, Blockly, 인식 의존성, 작성 자료와 사용자 가이드를 포함한다. 패키지 검사는 기본 Blockly·마우스 모션·v1.3 인식 프로젝트와 v1.4 Python 프로젝트의 열기·저장·검증을 확인한다. Python 예제의 별도 Runner 드라이런과 작성 자료 ZIP 생성도 검사한다.
+
+v1.4.0 배포본으로 `test-windows-package.ps1`의 기본·`-MotionShowcase`·`-VisionShowcase`·`-PythonShowcase` 네 경로가 모두 통과했다. 기본·모션·Python 경로는 별도 Runner 드라이런과 종료를 확인했고, 인식 예제는 템플릿 보존과 컴파일을 확인했다. Python 경로에서는 배포본에 포함된 문법·프롬프트·예제 8개를 사용해 작성 자료 ZIP을 내보냈다.
 
 이 호스트에는 개발용 Python이 설치되어 있다. 배포 검사는 실행 프로세스의 PATH에서 Python을 제거하고 PYTHONPATH/PYTHONHOME을 지운 상태로 시작하며, 편집기와 Runner가 패키지 내부 Python DLL을 로드하는지 확인한다. Python이 전혀 설치되지 않은 별도 Windows 설치본 검증은 수행하지 않았다. USB 분리·watchdog·장시간 주파수 검증은 기존 하드웨어 보고서의 범위이며 이번 PY-6에서는 재수행하지 않았다.
