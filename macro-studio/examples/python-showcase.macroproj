@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "project_id": "v1-4-python-showcase",
+  "name": "Python DSL showcase",
+  "workspace": {
+    "blocks": {
+      "languageVersion": 0,
+      "blocks": []
+    }
+  },
+  "globals": {},
+  "events": [],
+  "image_assets": {},
+  "output_profile": {
+    "output_kind": "fake"
+  },
+  "service_manifests": [
+    {
+      "manifest_version": 1,
+      "application_pack": {
+        "id": "desktop.essentials",
+        "name": "Desktop essentials",
+        "version": "1"
+      },
+      "services": [
+        {
+          "service_id": "actions.run",
+          "api_version": "1",
+          "python_symbol": "actions.run",
+          "kind": "async_action",
+          "parameters": [
+            {
+              "name": "action_id",
+              "type": "String",
+              "required": true
+            }
+          ],
+          "returns": "None",
+          "ir_opcode": "repeat",
+          "required_capabilities": [],
+          "interruptible": true,
+          "actions": [
+            {
+              "id": "desktop.confirm",
+              "name": "Confirm dialog",
+              "required_capabilities": [
+                "output.keyboard"
+              ],
+              "steps": [
+                {
+                  "op": "key_tap",
+                  "key": "ENTER",
+                  "hold_ns": 30000000
+                }
+              ]
+            },
+            {
+              "id": "desktop.cancel",
+              "name": "Cancel dialog",
+              "required_capabilities": [
+                "output.keyboard"
+              ],
+              "steps": [
+                {
+                  "op": "key_tap",
+                  "key": "ESC",
+                  "hold_ns": 30000000
+                }
+              ]
+            },
+            {
+              "id": "desktop.pause",
+              "name": "Pause briefly",
+              "required_capabilities": [],
+              "steps": [
+                {
+                  "op": "wait",
+                  "duration_ns": 200000000
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "service_requirements": {
+    "actions.run": "1"
+  },
+  "editor": {
+    "active_mode": "python",
+    "python": {
+      "source": "@on_start()\nasync def demo():\n    await actions.run(\"desktop.confirm\")\n    await macro.sleep(ms=3000)\n\n@on_hotkey(\"CTRL+F6\")\nasync def repeat_demo():\n    await keyboard.repeat(\"A\", frequency_hz=100, hold_ms=2, count=5)\n"
+    }
+  }
+}

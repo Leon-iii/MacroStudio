@@ -1,6 +1,6 @@
 # Phase 0 IR v1
 
-파일은 UTF-8 JSON입니다. 최상위 필드는 `ir_version`(정수 1), `project_id`(비어 있지 않은 문자열), `workflows`(객체), `handlers`(배열)입니다. `globals`는 전역 변수 이름과 초기값을 담는 객체이며 기본값은 빈 객체입니다.
+파일은 UTF-8 JSON입니다. 최상위 필드는 `ir_version`(정수 1~4), `project_id`(비어 있지 않은 문자열), `workflows`(객체), `handlers`(배열)입니다. `globals`는 전역 변수 이름과 초기값을 담는 객체이며 기본값은 빈 객체입니다.
 
 이미지 인식 블록이 있는 프로젝트는 `ir_version: 3`을 사용합니다. 기존 IR 1과 모션 프로파일의 IR 2도 읽습니다.
 
@@ -14,6 +14,8 @@
 ## 워크플로와 핸들러
 
 각 워크플로는 이름으로 참조하며 `steps` 배열을 가집니다. 각 핸들러는 고유한 `id`, `workflow_id`, `event`를 가집니다. 이벤트는 `{"type":"project_start"}` 또는 `{"type":"hotkey_pressed","hotkey":"F7"}`입니다. 선택 필드는 불리언 식 `guard`, 정수 `priority`(기본값 0), 불리언 `enabled`(기본값 true), `policy`입니다. 정책은 `ignore_if_running`(기본값), `restart`, `queue`, `parallel`, `override`를 지원합니다. 우선순위는 숫자가 클수록 높습니다.
+
+IR 4에서 워크플로는 `locals`에 지역 이름과 타입을 선언할 수 있습니다. 키는 `@local:`로 시작하고 값은 `number`, `boolean`, `string` 중 하나입니다. `set`은 지역값을 현재 워크플로 호출 범위에 저장합니다. 초기화 전 읽기는 실행 오류이며, 지역 정수 값은 64비트 크기로 제한됩니다. 기존 IR 1~3의 전역 변수 계약을 사용한 프로젝트도 읽습니다.
 
 ## 명령
 

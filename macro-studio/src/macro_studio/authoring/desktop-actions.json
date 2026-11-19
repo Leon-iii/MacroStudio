@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "application_pack": {"id": "desktop.essentials", "name": "Desktop essentials", "version": "1"},
+  "services": [{
+    "service_id": "actions.run",
+    "api_version": "1",
+    "python_symbol": "actions.run",
+    "kind": "async_action",
+    "parameters": [{"name": "action_id", "type": "String", "required": true}],
+    "returns": "None",
+    "ir_opcode": "repeat",
+    "required_capabilities": [],
+    "interruptible": true,
+    "actions": [
+      {"id": "desktop.confirm", "name": "Confirm dialog", "required_capabilities": ["output.keyboard"],
+       "steps": [{"op": "key_tap", "key": "ENTER", "hold_ns": 30000000}]},
+      {"id": "desktop.cancel", "name": "Cancel dialog", "required_capabilities": ["output.keyboard"],
+       "steps": [{"op": "key_tap", "key": "ESC", "hold_ns": 30000000}]},
+      {"id": "desktop.pause", "name": "Pause briefly", "required_capabilities": [],
+       "steps": [{"op": "wait", "duration_ns": 200000000}]}
+    ]
+  }]
+}

@@ -273,6 +273,6 @@ def test_invalid_ir_is_rejected_before_run(invoke, invalid_step):
 
 def test_unsupported_ir_version_is_rejected(invoke):
     ir = program({"automatic": []}, [handler("automatic")])
-    ir["ir_version"] = 4
+    ir["ir_version"] = 5
 
     assert invoke("validate", ir).returncode == 2

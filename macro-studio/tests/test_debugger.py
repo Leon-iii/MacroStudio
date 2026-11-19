@@ -87,6 +87,7 @@ def test_editor_routes_execution_highlights_and_breakpoints_as_distinct_messages
     editor = SimpleNamespace(
         session_state="RUNNING", pending_output=b"", log=logs.append,
         process=SimpleNamespace(readAllStandardOutput=lambda: wire),
+        highlight_python=lambda block_ids: None,
         bridge=SimpleNamespace(activeBlocksChanged=SimpleNamespace(emit=active.append),
                                focusBlock=SimpleNamespace(emit=focused.append)),
     )

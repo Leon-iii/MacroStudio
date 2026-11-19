@@ -22,6 +22,7 @@ SENSOR_REGION = {**SENSOR_COORDINATES, "width": (1, 1024), "height": (1, 1024)}
 OCR_LANGUAGES = ("eng", "kor", "kor+eng")
 VALUE_TYPES = {"number": int, "boolean": bool, "string": str}
 PARAM_PREFIX = "@arg:"
+LOCAL_PREFIX = "@local:"
 
 _BINARY = {
     "add": operator.add, "sub": operator.sub, "mul": operator.mul, "div": operator.truediv,
@@ -159,7 +160,10 @@ def evaluate(value, variables: dict, sensors=None, window=None, sensors_at=None,
     if "var" in value:
         if on_variable is not None:
             on_variable(value["var"])
-        return variables[value["var"]]
+        try:
+            return variables[value["var"]]
+        except KeyError:
+            raise ValueError(f"variable {value['var']!r} has no value") from None
     op = value["op"]
     if op == "target_window":
         return window is not None and window(value["state"])
@@ -492,7 +496,8 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
             result_type = VALUE_TYPES.get(target.get("return_type"))
             if "result" in step:
                 destination = _name(step["result"], location)
-                if (destination.startswith(PARAM_PREFIX) or result_type is None
+                if (destination.startswith(PARAM_PREFIX) or (ir_version >= 4 and destination.startswith(LOCAL_PREFIX))
+                        or result_type is None
                         or variables.get(destination) is not result_type):
                     raise ValidationError(f"{location}: return value requires a matching global variable")
             if "then" in step or "else" in step:
@@ -516,15 +521,16 @@ def _steps(raw, workflows, variables, path, depth=0, return_type=None, *, in_loo
 
 def validate_program(data: object) -> dict:
     raw = _object(data, "program")
-    version = _integer(raw.get("ir_version"), 1, 3, "ir_version")
+    version = _integer(raw.get("ir_version"), 1, 4, "ir_version")
     project_id = _name(raw.get("project_id"), "project_id")
     initial = _object(raw.get("globals", {}), "globals")
     variables = {
         _name(name, "global name"): _scalar_type(value, f"global {name}")
         for name, value in initial.items()
     }
-    if any(name.startswith(PARAM_PREFIX) for name in variables):
-        raise ValidationError("global variable uses a reserved parameter prefix")
+    scope_prefixes = (PARAM_PREFIX, LOCAL_PREFIX) if version >= 4 else (PARAM_PREFIX,)
+    if any(name.startswith(scope_prefixes) for name in variables):
+        raise ValidationError("global variable uses a reserved scope prefix")
     definitions = _object(raw.get("workflows"), "workflows")
     workflows = {}
     for name, definition in definitions.items():
@@ -544,9 +550,19 @@ def validate_program(data: object) -> dict:
         if returns is not None and (not isinstance(returns, str) or returns not in VALUE_TYPES):
             raise ValidationError(f"{path}: invalid return type")
         workflows[name] = {"params": params, "return_type": returns}
+        if "locals" in definition:
+            if version < 4:
+                raise ValidationError(f"{path}: workflow locals require IR version 4")
+            local = _object(definition["locals"], path)
+            for key, kind in local.items():
+                if (not isinstance(key, str) or not key.startswith(LOCAL_PREFIX) or not key[len(LOCAL_PREFIX):]
+                        or not isinstance(kind, str) or kind not in VALUE_TYPES):
+                    raise ValidationError(f"{path}: invalid local variable {key!r}")
+            workflows[name]["locals"] = dict(local)
     for name, workflow in workflows.items():
         scope = {**variables, **{PARAM_PREFIX + param["name"]: VALUE_TYPES[param["type"]]
                                  for param in workflow["params"]}}
+        scope.update({key: VALUE_TYPES[kind] for key, kind in workflow.get("locals", {}).items()})
         workflow["steps"] = _steps(definitions[name].get("steps"), workflows, scope,
                                    f"workflow {name}", return_type=workflow["return_type"], ir_version=version)
 

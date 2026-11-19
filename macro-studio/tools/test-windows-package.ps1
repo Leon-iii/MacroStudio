@@ -2,11 +2,12 @@
     [string] $Package = "$PSScriptRoot/../dist/MacroStudio",
     [switch] $RequireNoPython,
     [switch] $MotionShowcase,
-    [switch] $VisionShowcase
+    [switch] $VisionShowcase,
+    [switch] $PythonShowcase
 )
 
 $ErrorActionPreference = "Stop"
-if ($MotionShowcase -and $VisionShowcase) {
+if (([int]$MotionShowcase.IsPresent + [int]$VisionShowcase.IsPresent + [int]$PythonShowcase.IsPresent) -gt 1) {
     throw "Select one showcase."
 }
 if ($RequireNoPython) {
@@ -65,8 +66,8 @@ function Button($Window, $Name) {
     $Window.FindFirst($findDescendants, $condition)
 }
 
-function Invoke-FileAction($Name) {
-    Click-Element (Named $window "파일")
+function Invoke-FileAction($Name, $MenuName = "파일") {
+    Click-Element (Named $window $MenuName)
     $action = Wait-For "file menu action $Name" {
         $item = Named $window $Name
         if (-not $item) {
@@ -141,7 +142,8 @@ $packageRoot = (Resolve-Path -LiteralPath $Package).Path
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("MacroStudio-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $original = Join-Path $scratch "original.macroproj"
-$example = if ($VisionShowcase) { "vision-find-click.macroproj" }
+$example = if ($PythonShowcase) { "python-showcase.macroproj" }
+    elseif ($VisionShowcase) { "vision-find-click.macroproj" }
     elseif ($MotionShowcase) { "mouse_motion_showcase.macroproj" }
     else { "mixed-loop.macroproj" }
 Copy-Item -LiteralPath (Join-Path $packageRoot "examples/$example") $original
@@ -181,6 +183,34 @@ try {
     if ($MotionShowcase -and ($saved.settings.default_mouse_motion_profile_id -ne "builtin.precision" -or
         $saved.workspace.blocks.blocks[0].next.block.next.block.fields.PROFILE -ne "builtin.direct")) {
         throw "Saved project did not retain its motion profiles."
+    }
+    if ($PythonShowcase) {
+        if ($saved.schema_version -ne 2 -or $saved.editor.active_mode -ne "python" -or
+            $saved.editor.python.source -ne $sourceProject.editor.python.source -or
+            $saved.service_requirements.'actions.run' -ne "1") {
+            throw "Saved project did not retain its Python draft and service versions."
+        }
+        (Button $window "검증").GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Wait-For "validated Python source" {
+            $text = (Execution-Log) -join "`n"
+            if ($text -match '검증·변환 실패') { throw "Runner log: $text" }
+            $text -match 'Python 검증 완료'
+        } | Out-Null
+        $authoring = Join-Path $scratch "authoring.zip"
+        Invoke-FileAction "LLM 작성 자료 내보내기…" "Python"
+        Enter-Path "LLM 작성 자료 내보내기" $authoring
+        Wait-For "authoring archive" { Test-Path -LiteralPath $authoring } | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($authoring)
+        try {
+            if (-not $zip.GetEntry("project-context.json") -or
+                -not $zip.GetEntry("MACRO_STUDIO_PYTHON_API.md") -or
+                @($zip.Entries | Where-Object FullName -like "examples/*.py").Count -lt 8) {
+                throw "Authoring assets are missing from the frozen editor."
+            }
+        }
+        finally { $zip.Dispose() }
+        Remove-Item -LiteralPath $authoring
     }
     if ($VisionShowcase) {
         $finder = $saved.workspace.blocks.blocks[0].next.block

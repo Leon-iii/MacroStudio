@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macro-studio"
-version = "1.3.0"
+version = "1.4.0"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -20,7 +20,7 @@ macro-studio = "macro_studio.__main__:main"
 macro-studio-editor = "macro_studio.gui:main"
 
 [tool.setuptools.package-data]
-macro_studio = ["editor/*", "editor/msg/*", "editor/media/*"]
+macro_studio = ["editor/*", "editor/msg/*", "editor/media/*", "authoring/*.md", "authoring/*.json", "authoring/examples/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

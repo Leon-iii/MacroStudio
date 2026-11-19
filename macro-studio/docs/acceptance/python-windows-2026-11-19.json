@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "output": "sendinput",
+      "case": "unarmed",
+      "pass": true,
+      "physical_inputs": 0
+    },
+    {
+      "output": "sendinput",
+      "case": "stop",
+      "pass": true,
+      "release_observed_ms": 42.5859
+    },
+    {
+      "output": "sendinput",
+      "case": "focus_loss",
+      "pass": true,
+      "held_after_focus_return": [
+        false,
+        false
+      ],
+      "automatic_resume": false
+    },
+    {
+      "output": "sendinput",
+      "case": "emergency_stop",
+      "pass": true
+    },
+    {
+      "output": "external_hid",
+      "case": "unarmed",
+      "pass": true,
+      "physical_inputs": 0
+    },
+    {
+      "output": "external_hid",
+      "case": "stop",
+      "pass": true,
+      "release_observed_ms": 46.4127
+    },
+    {
+      "output": "external_hid",
+      "case": "focus_loss",
+      "pass": true,
+      "held_after_focus_return": [
+        false,
+        false
+      ],
+      "automatic_resume": false
+    },
+    {
+      "output": "external_hid",
+      "case": "emergency_stop",
+      "pass": true
+    },
+    {
+      "output": "fake",
+      "case": "vision_motion_click",
+      "pass": true,
+      "physical_inputs": 0
+    },
+    {
+      "output": "sendinput",
+      "case": "vision_motion_click",
+      "pass": true
+    }
+  ],
+  "hid_port": "COM5",
+  "pass": true
+}

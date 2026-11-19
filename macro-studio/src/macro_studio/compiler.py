@@ -1,4 +1,4 @@
-from .ir import PARAM_PREFIX, SCREEN_SENSOR_OPS, VISION_EVENTS, ValidationError, normalize_hotkey, validate_program
+from .ir import LOCAL_PREFIX, PARAM_PREFIX, SCREEN_SENSOR_OPS, VISION_EVENTS, ValidationError, normalize_hotkey, validate_program
 from .mouse_motion import BUILTIN_PROFILES, DEFAULT_PROFILE
 from .mouse_motion.registry import project_motion_profiles
 from .vision_profiles import DEFAULT_PROFILE as DEFAULT_VISION_PROFILE, resolve_profile
@@ -13,6 +13,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
     transitions = []
     initial = None
     version = 1
+    locals_ = {}
 
     def fail(block, message):
         raise ValidationError(f"({block.get('id', '?')}) {message}")
@@ -26,7 +27,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
 
     def vision_detector(block, *, detector=None):
         nonlocal version
-        version = 3
+        version = max(version, 3)
         detector = detector or field(block, "DETECTOR") or "template"
         image = field(block, "IMAGE") if detector == "template" else None
         if detector == "template" and (not isinstance(image, str) or image not in project.get("image_assets", {})):
@@ -84,6 +85,8 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
             return {"var": field(value, "NAME")}
         if kind == "parameter":
             return {"var": PARAM_PREFIX + field(value, "NAME")}
+        if kind == "local":
+            return {"var": LOCAL_PREFIX + field(value, "NAME")}
         if kind == "random_float":
             return {"op": kind, "args": [expression(value, "A", 0), expression(value, "B", 1)]}
         if kind in ("binary", "arithmetic", "comparison", "logical"):
@@ -98,7 +101,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
         if kind in ("vision_visible", "vision_color_visible"):
             return {"op": "vision_visible", **vision_detector(value, detector="hsv" if kind == "vision_color_visible" else None)}
         if kind == "vision_result":
-            version = 3
+            version = max(version, 3)
             return {"op": kind, "block_id": value["id"], "result_var": field(value, "RESULT"),
                     "field": field(value, "FIELD")}
         if kind in SCREEN_SENSOR_OPS:
@@ -259,6 +262,13 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                         step["else"] = steps(child(block, "ELSE"))
                 case "set":
                     step.update(var=field(block, "NAME"), value=expression(block, "VALUE", 0))
+                case "local_set":
+                    version = 4
+                    name = LOCAL_PREFIX + field(block, "NAME")
+                    kind = field(block, "TYPE")
+                    if kind != locals_.setdefault(name, kind):
+                        fail(block, "같은 지역 변수에 다른 타입을 지정할 수 없습니다.")
+                    step.update(op="set", var=name, value=expression(block, "VALUE", 0))
                 case "call" | "call_store" | "call_if":
                     step["op"] = "call"
                     step["workflow_id"] = field(block, "NAME")
@@ -298,6 +308,7 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
 
     detached = []
     for block in top_blocks:
+        locals_ = {}
         kind = block["type"]
         if kind == "ms_workflow":
             name = field(block, "NAME")
@@ -307,12 +318,16 @@ def compile_project(project, *, application_profile=DEFAULT_PROFILE, user_profil
                 {"name": field(param, "NAME"), "type": field(param, "TYPE"), "block_id": param["id"]}
                 for param in workflow_parameters[name]
             ]}
+            if locals_:
+                workflows[name]["locals"] = locals_
             returns = field(block, "RETURNS")
             if returns and returns != "void":
                 workflows[name]["return_type"] = returns
         elif kind in ("ms_start", "ms_hotkey", "ms_interval", "ms_custom", *("ms_" + event for event in VISION_EVENTS)):
             name = "@" + block["id"]
             workflows[name] = {"steps": steps(block.get("next", {}).get("block") or child(block, "BODY"))}
+            if locals_:
+                workflows[name]["locals"] = locals_
             event = {"type": "project_start"}
             if kind == "ms_hotkey":
                 key = keyboard_value(block, hotkey=True)

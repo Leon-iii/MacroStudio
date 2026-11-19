@@ -1,4 +1,4 @@
-# Macro Studio for Windows x64
+# Macro Studio v1.4.0 for Windows x64
 
 ZIP을 푼 뒤 `MacroStudio/MacroStudio.exe`를 실행합니다. 실행 파일과 `_internal` 폴더를 함께 유지하세요. 앱에 Python, Qt, Blockly가 포함되어 있습니다.
 
@@ -12,3 +12,5 @@ ZIP을 푼 뒤 `MacroStudio/MacroStudio.exe`를 실행합니다. 실행 파일�
 마우스 모션 기능은 패키지의 `docs/MOUSE_MOTION_PROFILE.md`와 `examples/mouse_motion_showcase.macroproj`에서 확인할 수 있습니다.
 
 **이미지 인식** 메뉴에서 화면 템플릿, 인식 프로파일, 미리보기를 관리할 수 있습니다. 배포본에는 MSS와 OpenCV가 포함됩니다. [시각 인식 안내](docs/VISUAL_RECOGNITION.md)
+
+Python 편집은 `examples/python-showcase.macroproj`를 열고 `검증` 후 시작하면 확인할 수 있습니다. Python 메뉴에서 외부 LLM 작성 자료와 예제 8개를 ZIP으로 내보낼 수 있습니다. [Python 사용자 가이드](docs/PYTHON_USER_GUIDE.md)와 [인수 검증 결과](docs/PYTHON_ACCEPTANCE.md)를 참고하세요.

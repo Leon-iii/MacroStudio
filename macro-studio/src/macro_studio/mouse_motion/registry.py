@@ -140,9 +140,9 @@ def motion_block_references(workspace):
     return references
 
 
-def capture_motion_profiles(project, users):
+def capture_motion_profiles(project, users, *, references=()):
     _, snapshots = project_motion_profiles(project)
-    for profile_id in sorted(motion_block_references(project["workspace"])):
+    for profile_id in sorted(motion_block_references(project["workspace"]) | set(references)):
         if profile_id in users:
             snapshots.setdefault(profile_id, users[profile_id])
     if snapshots:

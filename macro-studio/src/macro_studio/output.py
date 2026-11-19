@@ -100,6 +100,11 @@ def _validate_steps(steps: list[dict], path: str, capabilities: BackendCapabilit
                 _validate_steps(step[branch], f"{location}.{branch}", capabilities)
 
 
+def validate_capabilities(program: dict, capabilities: BackendCapabilities) -> None:
+    for name, workflow in program["workflows"].items():
+        _validate_steps(workflow["steps"], f"workflows.{name}.steps", capabilities)
+
+
 class OutputRouter:
     def __init__(self, routes: Mapping[OutputKind, OutputRoute]) -> None:
         self._routes = dict(routes)
@@ -126,6 +131,5 @@ class OutputRouter:
         if (kind is OutputKind.EXTERNAL_HID and config.profile.hid_mode == HidMode.ONBOARD
                 and not route.capabilities.onboard_tap_train):
             raise ValueError("unsupported HID mode: onboard requires TAP_TRAIN capability")
-        for name, workflow in program["workflows"].items():
-            _validate_steps(workflow["steps"], f"workflows.{name}.steps", route.capabilities)
+        validate_capabilities(program, route.capabilities)
         return OutputSession(kind, route.create_backend(), route.capabilities)

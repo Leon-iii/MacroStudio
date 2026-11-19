@@ -1,0 +1,87 @@
+{
+  "python": "3.13.1",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "logical_cpus": 12,
+  "scope": "warm parse, lower, IR validation and fingerprint recheck; excludes UI, file I/O and input execution",
+  "failures": 0,
+  "runs": [
+    {
+      "input_commands": 10,
+      "source_characters": 430,
+      "repetitions": 7,
+      "median_ms": 0.4517,
+      "min_ms": 0.4029,
+      "max_ms": 0.735,
+      "samples_ms": [
+        0.5193,
+        0.4338,
+        0.4441,
+        0.537,
+        0.735,
+        0.4517,
+        0.4029
+      ]
+    },
+    {
+      "input_commands": 100,
+      "source_characters": 4030,
+      "repetitions": 7,
+      "median_ms": 3.0851,
+      "min_ms": 2.5703,
+      "max_ms": 3.9297,
+      "samples_ms": [
+        3.0943,
+        3.5633,
+        3.9297,
+        3.0361,
+        3.0851,
+        2.668,
+        2.5703
+      ]
+    },
+    {
+      "input_commands": 300,
+      "source_characters": 12030,
+      "repetitions": 7,
+      "median_ms": 9.0452,
+      "min_ms": 8.3137,
+      "max_ms": 10.502,
+      "samples_ms": [
+        8.3137,
+        9.6452,
+        10.502,
+        8.4206,
+        9.6096,
+        9.0452,
+        8.3773
+      ]
+    }
+  ],
+  "cpu_busy_percent_before": 31.770833333333336,
+  "profile_hotspots": [
+    {
+      "function": "~:<built-in method builtins.compile>",
+      "self_seconds": 0.0023636
+    },
+    {
+      "function": "ast.py:iter_child_nodes",
+      "self_seconds": 0.0023427
+    },
+    {
+      "function": "ir.py:vision_nodes",
+      "self_seconds": 0.0020817
+    },
+    {
+      "function": "~:<built-in method builtins.isinstance>",
+      "self_seconds": 0.0017021
+    },
+    {
+      "function": "ast.py:iter_fields",
+      "self_seconds": 0.0011408
+    },
+    {
+      "function": "ast.py:walk",
+      "self_seconds": 0.0010494
+    }
+  ]
+}

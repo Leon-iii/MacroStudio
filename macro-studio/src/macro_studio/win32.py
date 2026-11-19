@@ -194,17 +194,20 @@ class WindowsDesktop:
 
     def mouse_position(self) -> tuple[int, int]:
         point = w.POINT()
-        if not self._cursor(c.byref(point)):
-            raise c.WinError(c.get_last_error())
+        with self.physical_coordinates():
+            if not self._cursor(c.byref(point)):
+                raise c.WinError(c.get_last_error())
         return point.x, point.y
 
     def point_over(self, target: WindowTarget, position: tuple[int, int]) -> bool:
-        hwnd = self._window_at(w.POINT(*position))
-        return bool(hwnd and (hwnd == target.hwnd or self._ancestor(hwnd, 2) == target.hwnd))
+        with self.physical_coordinates():
+            hwnd = self._window_at(w.POINT(*position))
+            return bool(hwnd and (hwnd == target.hwnd or self._ancestor(hwnd, 2) == target.hwnd))
 
     def send_mouse_move(self, position: tuple[int, int]) -> None:
-        if not self._set_cursor(*position):
-            raise c.WinError(c.get_last_error())
+        with self.physical_coordinates():
+            if not self._set_cursor(*position):
+                raise c.WinError(c.get_last_error())
 
     @contextmanager
     def physical_coordinates(self):
@@ -217,10 +220,11 @@ class WindowsDesktop:
             self._set_dpi_context(previous)
 
     def send_mouse_absolute(self, position: tuple[int, int]) -> None:
-        desktop = tuple(self._system_metric(metric) for metric in VIRTUAL_DESKTOP_METRICS)
-        x, y = normalize_absolute(position, desktop)
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE
-        self._insert(Input(0, InputData(mouse=MouseInput(x, y, 0, flags, 0, 0))))
+        with self.physical_coordinates():
+            desktop = tuple(self._system_metric(metric) for metric in VIRTUAL_DESKTOP_METRICS)
+            x, y = normalize_absolute(position, desktop)
+            flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_ABSOLUTE
+            self._insert(Input(0, InputData(mouse=MouseInput(x, y, 0, flags, 0, 0))))
 
     @contextmanager
     def hotkeys(self, mapping: dict[int, str]):

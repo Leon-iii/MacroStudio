@@ -1,4 +1,6 @@
+import ast
 import json
+from copy import deepcopy
 from pathlib import Path
 import re
 import sys
@@ -16,7 +18,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings, QWebEngi
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyleOptionComboBox, QTabWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QStyleOptionComboBox, QTabWidget, QDialog,
     QVBoxLayout, QWidget,
 )
 
@@ -36,6 +38,13 @@ from .mouse_motion_preview import MotionPreviewDialog
 from .mouse_profile_dialog import MotionProfilesDialog
 from .output import HidMode, OutputKind
 from .properties_panel import PropertiesPanel, workspace_properties
+from .python_editor import CodeEdit, PythonEditor, validate_editor
+from .python_compiler import compile_python
+from .python_dsl import MAX_SOURCE_CHARS
+from .python_roundtrip import CanonicalPython, generate_python, render_blocks
+from .python_authoring import diagnostic_feedback, write_authoring_archive
+from .python_authoring_dialog import ReviewPythonDialog, ServicePacksDialog
+from .python_services import ServiceRegistry
 from .sensors import sensor_specs
 from .vision_dialog import CaptureDialog, PreviewDialog, ProfileDialog
 from .vision_profiles import BUILTIN_PROFILES as VISION_BUILTINS, DEFAULT_PROFILE as DEFAULT_VISION_PROFILE, resolve_profile, validate_profiles
@@ -233,6 +242,7 @@ def new_project(example=False):
 
 class Studio(QMainWindow):
     hid_probe_result = Signal(int, str, object, str)
+    python_result = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -260,7 +270,15 @@ class Studio(QMainWindow):
         self.heartbeat.timeout.connect(lambda: self.send("heartbeat"))
         self.pending_output = b""
         self.last_error_block = ""
+        self.last_error_source = None
         self.editor_ready = False
+        self.edit_mode = "blocks"
+        self.edit_revision = 0
+        self.python_busy = False
+        self.python_snapshot = None
+        self.python_source_map = {}
+        self.python_run_source = None
+        self.python_diagnostic = None
         self.property_options = None
         self.hid_ports = {}
         self.hid_devices = {}
@@ -272,6 +290,7 @@ class Studio(QMainWindow):
         self.hid_timer = QTimer(self, interval=1500)
         self.hid_timer.timeout.connect(self.load_hid_ports)
         self.hid_probe_result.connect(self.finish_hid_probe)
+        self.python_result.connect(self.finish_python)
         self.build()
         self.update_properties(publish=True)
         self.refresh()
@@ -287,6 +306,16 @@ class Studio(QMainWindow):
         ):
             action = menu.addAction(title, slot)
             action.setShortcut(shortcut)
+        self.python_menu = self.menuBar().addMenu("Python")
+        python_menu = self.python_menu
+        python_menu.addAction("생성된 Python 보기…", lambda: self.request_python("preview"))
+        python_menu.addAction("LLM 작성 자료 내보내기…", self.export_authoring)
+        python_menu.addAction("서비스 Manifest 관리…", self.manage_service_packs)
+        python_menu.addAction("생성 코드 붙여넣기…", self.paste_python)
+        python_menu.addAction("소스 가져오기…", self.import_python)
+        python_menu.addAction("소스 내보내기…", self.export_python)
+        python_menu.addAction("이전 Python 초안 복원", self.restore_python)
+        python_menu.addAction("이전 블록 편집본 복원", self.restore_blocks)
         self.mouse_menu = self.menuBar().addMenu("마우스")
         self.project_motion_menu = self.mouse_menu.addMenu("프로젝트 기본 모션 프로파일")
         self.app_motion_menu = self.mouse_menu.addMenu("앱 기본 모션 프로파일")
@@ -336,7 +365,20 @@ class Studio(QMainWindow):
 
         body = QHBoxLayout()
         body.setSpacing(0)
-        body.addWidget(self.build_canvas(), 1)
+        self.editors = QTabWidget()
+        self.editors.setAccessibleName("편집 모드")
+        self.editors.addTab(self.build_canvas(), "블록")
+        self.python_editor = PythonEditor()
+        self.editors.addTab(self.python_editor, "Python")
+        self.editors.setTabToolTip(1, "지원하는 블록을 Python으로 변환합니다. 기존 Python 초안은 별도로 보존합니다.")
+        self.editors.setTabToolTip(0, "지원하는 Python을 블록으로 변환합니다. 원본 코드와 이전 블록 편집본을 보존합니다.")
+        self.editors.currentChanged.connect(self.switch_editor)
+        self.python_editor.code.textChanged.connect(self.python_changed)
+        self.python_editor.import_button.clicked.connect(self.import_python)
+        self.python_editor.export_button.clicked.connect(self.export_python)
+        self.python_editor.restore_button.clicked.connect(self.restore_python)
+        self.python_editor.feedback_button.clicked.connect(self.copy_python_diagnostic)
+        body.addWidget(self.editors, 1)
 
         inspector_scroll = QScrollArea(objectName="inspector")
         inspector_scroll.setWidgetResizable(True)
@@ -491,6 +533,19 @@ class Studio(QMainWindow):
             self.log("블록 편집기를 불러오지 못했습니다.")
 
     def load_workspace(self):
+        self.edit_revision += 1
+        self.python_snapshot = None
+        self.python_diagnostic = None
+        self.python_editor.feedback_button.setEnabled(False)
+        editor = self.project.get("editor", {})
+        self.edit_mode = editor.get("active_mode", "blocks")
+        with QSignalBlocker(self.python_editor.code):
+            self.python_editor.code.setPlainText(editor.get("python", {}).get("source", ""))
+        with QSignalBlocker(self.editors):
+            self.editors.setCurrentIndex(1 if self.edit_mode == "python" else 0)
+        self.python_editor.code.setExtraSelections([])
+        self.python_editor.language.setText("Python DSL v1.4 · 검증 전")
+        self.python_editor.status.setText("Python 소스를 검증한 뒤 실행하세요.")
         self.update_properties(publish=True)
         self.publish_image_assets()
         self.publish_motion_profiles()
@@ -560,7 +615,7 @@ class Studio(QMainWindow):
         try:
             project_default, _ = project_motion_profiles(self.project)
             dialog = MotionProfilesDialog(self, self.motion_profiles, project_default,
-                                          motion_block_references(self.project["workspace"]))
+                                          motion_block_references(self.project["workspace"]) | self.python_references())
         except (ValueError, OSError) as error:
             QMessageBox.warning(self, "모션 프로파일 관리", str(error))
             return
@@ -612,7 +667,8 @@ class Studio(QMainWindow):
             return
         dialog = ImageAssetsDialog(
             self, self.project.setdefault("image_assets", {}),
-            lambda asset_id: asset_references(self.project["workspace"], asset_id), self.image_assets_changed,
+            lambda asset_id: asset_references(self.project["workspace"], asset_id) +
+                            int(asset_id in self.python_references()), self.image_assets_changed,
             VISION_BUILTINS | self.project.get("vision_profiles", {}),
         )
         dialog.exec()
@@ -744,7 +800,301 @@ class Studio(QMainWindow):
         self.publish_image_assets()
         self.modified()
 
+    def python_metadata(self):
+        self.project["schema_version"] = 2
+        return self.project.setdefault("editor", {"active_mode": self.edit_mode, "python": {"source": ""}})
+
+    def python_references(self):
+        references = set()
+        python = self.project.get("editor", {}).get("python", {})
+        for source in (python.get("source", ""), python.get("previous_source", "")):
+            try:
+                tree = ast.parse(source)
+            except (SyntaxError, ValueError, RecursionError):
+                continue
+            references.update(node.value for node in ast.walk(tree)
+                              if isinstance(node, ast.Constant) and isinstance(node.value, str))
+        return references
+
+    def python_changed(self):
+        if self.edit_mode != "python":
+            return
+        self.python_metadata()["python"]["source"] = self.python_editor.code.toPlainText()
+        self.python_editor.code.setExtraSelections([])
+        self.modified()
+
+    def compiler_settings(self):
+        application, users = self.application_motion_profiles()
+        if application is None:
+            raise ValueError("앱 기본 모션 프로파일을 읽을 수 없습니다.")
+        return {"application_profile": application, "user_profiles": users,
+                "application_vision_profile": self.application_vision_profile()}
+
+    def switch_editor(self, index):
+        with QSignalBlocker(self.editors):
+            self.editors.setCurrentIndex(1 if self.edit_mode == "python" else 0)
+        if self.running or index == (1 if self.edit_mode == "python" else 0):
+            return
+        self.request_python("python" if index else "blocks")
+
+    def request_python(self, action):
+        if self.python_busy or (self.running and action != "verify"):
+            return
+        try:
+            settings = self.compiler_settings()
+        except ValueError as error:
+            self.show_error(str(error))
+            return
+        context = (self.edit_revision, deepcopy(self.project), settings, self.edit_mode, self.path)
+        self.python_busy = True
+        self.python_snapshot = None
+        self.python_editor.status.setText("검증 중…")
+        self.refresh()
+
+        def compile_edit():
+            _, project, options, mode, _ = context
+            result = {"action": action, "context": context}
+            try:
+                if mode == "python":
+                    source = project["editor"]["python"]["source"]
+                    origin = project["editor"]["python"].get("generated")
+                    if origin and source == origin["source"]:
+                        artifact = CanonicalPython(source, tuple(tuple(item) for item in origin["block_ids_by_line"]))
+                        snapshot = artifact.compile(project, **options)
+                    else:
+                        snapshot = compile_python(source, project, **options)
+                    program = snapshot.program_for(source, project, **options)
+                    result["snapshot"] = snapshot
+                    if action == "blocks":
+                        result["workspace"] = render_blocks(program, project, **options)
+                else:
+                    program, detached = compile_project(project, **options)
+                    if detached:
+                        raise ValueError("연결되지 않은 블록을 보존하려면 먼저 연결하거나 별도 프로젝트로 저장하세요.")
+                if action in ("python", "preview"):
+                    artifact = generate_python(program, project, **options)
+                    result["generated"] = {"source": artifact.source,
+                                           "block_ids_by_line": [list(item) for item in artifact.block_ids_by_line]}
+                sensor_specs(program)
+                if mode == "python":
+                    services = sorted({node.func.value.id for node in ast.walk(ast.parse(source))
+                                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                                       and isinstance(node.func.value, ast.Name)})
+                    result["services"] = services
+                result["program"] = program
+            except (ValueError, KeyError, TypeError, RecursionError) as error:
+                result["error"] = error
+            try:
+                self.python_result.emit(result)
+            except RuntimeError:
+                pass  # The window can close while compilation finishes.
+
+        Thread(target=compile_edit, daemon=True).start()
+
+    @Slot(object)
+    def finish_python(self, result):
+        self.python_busy = False
+        revision, project, settings, mode, path = result["context"]
+        try:
+            current_settings = self.compiler_settings()
+        except ValueError:
+            current_settings = None
+        if (revision != self.edit_revision or project != self.project or mode != self.edit_mode or
+                path != self.path or settings != current_settings):
+            self.python_editor.status.setText("검증 중 편집 내용이 변경되었습니다. 다시 검증하세요.")
+            self.refresh()
+            return
+        error = result.get("error")
+        if error is not None:
+            self.python_diagnostic = diagnostic_feedback(error)
+            self.python_editor.feedback_button.setEnabled(True)
+            diagnostic = getattr(error, "diagnostic", None)
+            span = diagnostic.source if diagnostic else getattr(error, "source", None)
+            if span is None and "snapshot" in result:
+                span = dict(result["snapshot"].source_map).get(getattr(error, "block_id", None))
+            message = f"{diagnostic.code} · {error}" if diagnostic else str(error)
+            if span:
+                message = f"줄 {span.line} · {message}"
+                self.python_editor.code.show_source(span, error=True)
+            self.python_editor.status.setText(message)
+            self.show_error(f"검증·변환 실패 · {message}", getattr(error, "block_id", ""), span)
+            self.refresh()
+            return
+        action = result["action"]
+        if action == "preview":
+            self.python_snapshot = result.get("snapshot")
+            self.python_editor.status.setText("생성된 Python을 읽기 전용 창에서 확인할 수 있습니다.")
+            dialog = QDialog(self)
+            dialog.setWindowTitle("생성된 Python · 읽기 전용")
+            dialog.resize(800, 580)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            layout = QVBoxLayout(dialog)
+            code = CodeEdit()
+            code.setReadOnly(True)
+            code.setPlainText(result["generated"]["source"])
+            layout.addWidget(code)
+            close = self.button("닫기", dialog.close)
+            layout.addWidget(close)
+            dialog.show()
+            self.refresh()
+            return
+        if action == "python":
+            metadata = self.python_metadata()
+            generated = result["generated"]
+            previous = metadata["python"].get("source", "")
+            if previous and previous != generated["source"]:
+                metadata["python"]["previous_source"] = previous
+            metadata["python"]["source"] = generated["source"]
+            metadata["python"]["generated"] = generated
+            metadata["active_mode"] = "python"
+            self.load_workspace()
+            self.modified()
+            self.request_python("verify")
+            return
+        if action == "blocks":
+            metadata = self.python_metadata()
+            metadata["previous_workspace"] = deepcopy(self.project["workspace"])
+            metadata["active_mode"] = "blocks"
+            self.project["workspace"] = result["workspace"]
+            self.load_workspace()
+            self.modified()
+            return
+        self.python_snapshot = result["snapshot"]
+        self.python_diagnostic = None
+        self.python_editor.feedback_button.setEnabled(False)
+        self.last_error_source = None
+        self.last_error_block = ""
+        self.jump.setEnabled(False)
+        self.python_editor.code.setExtraSelections([])
+        self.python_editor.status.setText("검증 완료 · 현재 소스로 실행할 수 있습니다.")
+        services = ", ".join(result["services"]) or "없음"
+        self.python_editor.language.setText(f"Python DSL v1.4 · 사용 서비스 {services}")
+        self.log("Python 검증 완료")
+        self.refresh()
+        if action in ("start", "debug"):
+            self.python_source_map = dict(self.python_snapshot.source_map)
+            self.python_run_source = project["editor"]["python"]["source"]
+            self.start_program(result["program"], action == "debug")
+        elif action == "arm":
+            self.apply_arm(False)
+
+    def import_python(self):
+        if self.running or self.python_busy:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Python 소스 가져오기", "", "Python (*.py)")
+        if not path:
+            return
+        try:
+            file = Path(path)
+            if file.stat().st_size > MAX_SOURCE_CHARS * 4 + 3:
+                raise ValueError("Python 소스가 크기 한도를 초과했습니다.")
+            source = file.read_text(encoding="utf-8-sig")
+            if len(source) > MAX_SOURCE_CHARS:
+                raise ValueError("Python 소스가 64 KiB 문자 한도를 초과했습니다.")
+            self.review_python(source)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "소스 가져오기 실패", str(error))
+
+    def review_python(self, source):
+        if self.running or self.python_busy:
+            return
+        if len(source) > MAX_SOURCE_CHARS:
+            QMessageBox.warning(self, "소스 가져오기 실패", "Python 소스가 64 KiB 문자 한도를 초과했습니다.")
+            return
+        previous = self.project.get("editor", {}).get("python", {}).get("source", "")
+        dialog = ReviewPythonDialog(self, previous, source)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        if accepted:
+            metadata = self.python_metadata()
+            metadata["python"]["previous_source"] = previous
+            metadata["python"]["source"] = source
+            metadata["active_mode"] = "python"
+            self.load_workspace()
+            self.modified()
+
+    def paste_python(self):
+        self.review_python(QApplication.clipboard().text())
+
+    def copy_python_diagnostic(self):
+        if self.python_diagnostic is not None:
+            QApplication.clipboard().setText(json.dumps(self.python_diagnostic, ensure_ascii=False, indent=2))
+
+    def export_authoring(self):
+        if self.python_busy:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "LLM 작성 자료 내보내기", "MacroStudio-LLM-Authoring.zip", "ZIP (*.zip)")
+        if not path:
+            return
+        try:
+            write_authoring_archive(Path(path), self.project, **self.compiler_settings())
+            self.log("LLM 작성 자료를 내보냈습니다.")
+        except (ValueError, OSError, KeyError, TypeError, RecursionError) as error:
+            QMessageBox.warning(self, "작성 자료 내보내기 실패", str(error))
+
+    def manage_service_packs(self):
+        if self.running or self.python_busy:
+            return
+        dialog = ServicePacksDialog(self, self.project)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            registry = ServiceRegistry({**self.project, "service_manifests": dialog.manifests, "service_requirements": {}})
+            self.python_metadata()
+            self.project["service_manifests"] = registry.manifests
+            self.project["service_requirements"] = registry.versions
+            self.modified()
+        dialog.deleteLater()
+
+    def export_python(self):
+        if self.edit_mode != "python":
+            self.log("Python 탭으로 전환한 뒤 소스를 내보내세요.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Python 소스 내보내기", self.project["name"] + ".py",
+                                             "Python (*.py)")
+        if not path:
+            return
+        from PySide6.QtCore import QSaveFile
+        output = QSaveFile(path)
+        data = self.python_editor.code.toPlainText().encode("utf-8")
+        if (not output.open(QIODevice.OpenModeFlag.WriteOnly) or output.write(data) != len(data)
+                or not output.commit()):
+            QMessageBox.warning(self, "소스 내보내기 실패", output.errorString())
+
+    def restore_python(self):
+        if self.running or self.python_busy:
+            return
+        python = self.project.get("editor", {}).get("python", {})
+        previous = python.get("previous_source")
+        if previous is None:
+            return
+        python["source"], python["previous_source"] = previous, python.get("source", "")
+        self.project["editor"]["active_mode"] = "python"
+        self.load_workspace()
+        self.modified()
+
+    def restore_blocks(self):
+        metadata = self.project.get("editor", {})
+        if self.running or self.python_busy or "previous_workspace" not in metadata:
+            return
+        self.project["workspace"], metadata["previous_workspace"] = (
+            metadata["previous_workspace"], self.project["workspace"])
+        metadata["active_mode"] = "blocks"
+        self.load_workspace()
+        self.modified()
+
+    def highlight_python(self, block_ids):
+        if self.edit_mode != "python" or self.python_run_source != self.python_editor.code.toPlainText():
+            return
+        self.python_editor.code.setExtraSelections([])
+        for block_id in block_ids:
+            span = self.python_source_map.get(block_id)
+            if span:
+                self.python_editor.code.show_source(span)
+                break
+
     def workspace_changed(self, value):
+        if self.edit_mode != "blocks":
+            return
         self.project["workspace"] = json.loads(value)
         self.update_properties()
         self.modified()
@@ -789,6 +1139,13 @@ class Studio(QMainWindow):
         self.modified()
 
     def modified(self):
+        self.edit_revision += 1
+        self.python_snapshot = None
+        self.python_diagnostic = None
+        self.python_editor.feedback_button.setEnabled(False)
+        if self.edit_mode == "python":
+            self.python_editor.status.setText("소스 또는 설정이 변경되었습니다. 다음 실행 전에 검증하세요.")
+            self.python_editor.language.setText("Python DSL v1.4 · 검증 전")
         self.dirty = True
         self.refresh()
 
@@ -810,22 +1167,30 @@ class Studio(QMainWindow):
         self.footer.setText(f"{name}{changed}    |    {self.path.name if self.path else '저장된 파일 없음'}")
         self.state_label.setText(STATES.get(self.session_state, "대상 창 전환 대기") if self.running
                                  else STATES[self.session_state] if self.session_state in STATES else "준비")
-        self.transport_button.setEnabled(self.running or self.editor_ready)
+        python_valid = self.edit_mode != "python" or self.python_snapshot is not None
+        can_compile = self.editor_ready and not self.python_busy
+        self.transport_button.setEnabled(self.running or (can_compile and python_valid))
         self.set_style_state(self.transport_button, "stopping", self.running)
         self.set_icon_action(self.transport_button, "stop" if self.running else "play",
                              "정지" if self.running else "시작")
-        self.verify_button.setEnabled(self.editor_ready)
+        self.verify_button.setEnabled(can_compile)
         self.manage_images.setEnabled(self.editor_ready and not self.running)
         at_breakpoint = self.running and self.session_state == "BREAKPOINT"
-        self.debug_button.setEnabled(self.editor_ready and not self.running and not armed)
+        self.debug_button.setEnabled(can_compile and python_valid and not self.running and not armed)
         self.step_button.setEnabled(at_breakpoint)
         self.pause.setEnabled(self.running and self.session_state in ("RUNNING", "PAUSED", "BREAKPOINT"))
         resumable = self.session_state in ("PAUSED", "BREAKPOINT")
         self.set_icon_action(self.pause, "resume" if resumable else "pause", "재개" if resumable else "일시정지")
-        self.arm_button.setEnabled(bool(self.store) and not self.running and (project_armed or not explicit_dry_run))
+        self.arm_button.setEnabled(bool(self.store) and not self.running and
+                                   (project_armed or (can_compile and python_valid and not explicit_dry_run)))
+        self.editors.tabBar().setEnabled(not self.running and not self.python_busy)
+        self.python_editor.import_button.setEnabled(not self.running and not self.python_busy)
+        self.python_editor.restore_button.setEnabled(not self.running and not self.python_busy and
+            bool(self.project.get("editor", {}).get("python", {}).get("previous_source")))
         self.set_style_state(self.arm_button, "armed", project_armed)
         self.set_icon_action(self.arm_button, "armed" if project_armed else "arm",
                              "ARM 해제" if project_armed else "ARM 설정")
+        self.jump.setText("오류 위치 보기" if self.edit_mode == "python" else "오류 블록 보기")
         self.output.setEnabled(not self.running)
         self.hid_port.setEnabled(not self.running)
         self.hid_mode.setEnabled(not self.running and bool(self.checked_port))
@@ -1033,11 +1398,12 @@ class Studio(QMainWindow):
             return
         try:
             project = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-            if (not isinstance(project, dict) or project.get("schema_version") != 1
+            if (not isinstance(project, dict)
                     or not isinstance(project.get("project_id"), str)
                     or not isinstance(project.get("workspace"), dict)
                     or not isinstance(project.get("name"), str)):
                 raise ValueError("지원하지 않는 프로젝트 형식입니다.")
+            validate_editor(project)
             validate_assets(project.get("image_assets", {}))
             validate_profiles(project.get("vision_profiles", {}))
             resolve_profile(project)
@@ -1073,8 +1439,9 @@ class Studio(QMainWindow):
         from PySide6.QtCore import QSaveFile
         try:
             project = dict(self.project, name=path.stem)
+            validate_editor(project)
             _, users = self.application_motion_profiles()
-            capture_motion_profiles(project, users)
+            capture_motion_profiles(project, users, references=self.python_references())
             if copy:
                 project["project_id"] = uuid4().hex
             output = QSaveFile(str(path))
@@ -1087,20 +1454,34 @@ class Studio(QMainWindow):
             QMessageBox.warning(self, "저장 실패", str(error))
             return False
         self.project, self.path, self.dirty = project, path, False
+        self.python_snapshot = None
+        if self.edit_mode == "python":
+            self.python_editor.status.setText("저장되었습니다. 실행 전에 현재 소스를 다시 검증하세요.")
         self.refresh()
         return True
 
     def jump_to_error(self):
+        if self.edit_mode == "python" and self.last_error_source:
+            self.python_editor.code.show_source(self.last_error_source, error=True)
+            return
         self.bridge.focusBlock.emit(self.last_error_block)
 
-    def show_error(self, message, block=""):
+    def show_error(self, message, block="", source=None):
         self.log(message)
         self.last_error_block = block or ""
-        self.jump.setEnabled(bool(block))
+        if (source is None and self.edit_mode == "python" and
+                self.python_run_source == self.python_editor.code.toPlainText()):
+            source = self.python_source_map.get(block)
+        self.last_error_source = source
+        self.jump.setEnabled(bool(block or source))
         self.jump_to_error()
 
     def verify(self):
+        if self.edit_mode == "python":
+            self.request_python("verify")
+            return None
         self.last_error_block = ""
+        self.last_error_source = None
         self.jump.setEnabled(False)
         self.jump_to_error()
         try:
@@ -1126,8 +1507,15 @@ class Studio(QMainWindow):
             return
         armed = self.armed()
         if not armed:
+            if self.edit_mode == "python":
+                self.request_python("arm")
+                return
             if self.verify() is None:
                 return
+        self.apply_arm(armed)
+
+    def apply_arm(self, armed):
+        if not armed:
             if QMessageBox.question(
                 self, "실입력 허용",
                 f"{self.output.currentText()}에서 선택한 창에 실제 키보드·마우스 입력을 보낼 수 있습니다. ARM을 설정할까요?",
@@ -1140,9 +1528,17 @@ class Studio(QMainWindow):
         self.refresh()
 
     def start(self, debug=False):
+        if self.running:
+            return
+        if self.edit_mode == "python":
+            self.request_python("debug" if debug else "start")
+            return
         program = self.verify()
         if program is None or self.running:
             return
+        self.start_program(program, debug)
+
+    def start_program(self, program, debug=False):
         armed = self.real_output()
         if debug and armed:
             return
@@ -1256,8 +1652,10 @@ class Studio(QMainWindow):
                     self.bridge.focusBlock.emit(message["block_id"])
                     self.log("브레이크포인트 · " + message["block_id"])
                     self.refresh()
+                    self.highlight_python([message["block_id"]])
                 elif kind == "active_blocks":
                     self.bridge.activeBlocksChanged.emit(message["block_ids"])
+                    self.highlight_python(message["block_ids"])
                 elif kind == "inputs":
                     self.log("\n".join(f"{action} · {key}" for action, key in message["events"]))
                     if message["omitted"]:

@@ -8,7 +8,7 @@ from secrets import randbits
 from typing import TYPE_CHECKING
 
 from .backend import Clock, InputBackend
-from .ir import MAX_CALL_DEPTH, MAX_REPEAT_COUNT, PARAM_PREFIX, VISION_EVENTS, duration_nanoseconds, evaluate
+from .ir import LOCAL_PREFIX, MAX_CALL_DEPTH, MAX_REPEAT_COUNT, PARAM_PREFIX, VISION_EVENTS, duration_nanoseconds, evaluate
 from .mouse_motion import MotionGenerator, MouseMotionProfile
 from .mouse_motion.quantizer import RelativeQuantizer, first_report
 
@@ -417,7 +417,7 @@ class Runtime:
                 sources[key] = observation
 
         def on_variable(name):
-            stored = scope.sources if name.startswith(PARAM_PREFIX) and scope is not None else self._global_sources
+            stored = scope.sources if scope is not None and name in scope.values else self._global_sources
             for observation in stored.get(name, ()):
                 track(observation)
 
@@ -707,8 +707,14 @@ class Runtime:
                     self._custom_events.append((self.clock.now_ns + YIELD_NS, step["name"]))
                 case "set":
                     sources = {}
-                    self.globals[step["var"]] = self._evaluate(step["value"], scope, task, sources)
-                    self._global_sources[step["var"]] = tuple(sources.values())
+                    name = step["var"]
+                    local = self.program["ir_version"] >= 4 and name.startswith(LOCAL_PREFIX)
+                    values, tracked = (scope.values, scope.sources) if local else (self.globals, self._global_sources)
+                    value = self._evaluate(step["value"], scope, task, sources)
+                    if local and type(value) is int and value.bit_length() > 64:
+                        raise TaskFault("local_number_range", "local integer exceeds the 64-bit limit")
+                    values[name] = value
+                    tracked[name] = tuple(sources.values())
                 case "if":
                     condition = self._evaluate(step["condition"], scope, task)
                     branch = step["then"] if condition else step.get("else", [])
